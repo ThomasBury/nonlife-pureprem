@@ -13,3 +13,12 @@ dependencies = [
     "rich>=13.9.4",
     "scikit-learn>=1.7.2",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.0",
+    "ty>=0.0.64",
+]
+
+[tool.ruff]
+target-version = "py314"

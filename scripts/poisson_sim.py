@@ -13,10 +13,10 @@ eye in the terminal output.
 """
 
 # %%
-import pandas as pd
-import numpy as np
-from typing import Tuple
+
 import lightgbm as lgb
+import numpy as np
+import pandas as pd
 from scipy.stats import poisson
 
 try:
@@ -26,7 +26,7 @@ try:
 
     RICH_AVAILABLE = True
     console = Console()
-except Exception:
+except ImportError:
     RICH_AVAILABLE = False
     console = None
 
@@ -37,10 +37,10 @@ np.random.seed(100)
 
 def emit(message: str) -> None:
     """Print a message with Rich when available."""
-    if RICH_AVAILABLE:
-        console.print(message)
-    else:
+    if console is None:
         print(message)
+        return
+    console.print(message)
 
 
 def _format_value(value: object) -> str:
@@ -57,7 +57,7 @@ def _format_value(value: object) -> str:
 
 def print_table(title: str, df: pd.DataFrame) -> None:
     """Render a DataFrame as a Rich table when possible."""
-    if not RICH_AVAILABLE:
+    if console is None:
         print(f"\n=== {title} ===")
         print(df)
         return
@@ -70,33 +70,43 @@ def print_table(title: str, df: pd.DataFrame) -> None:
         table.add_row(*[_format_value(row[col]) for col in df.columns])
     console.print(table)
 
+
 # %% [markdown]
 # # DATA GENERATION
 # %%
 # DATA GENERATION
-data_basic = pd.DataFrame({
-    'var1': ['A'] * 5000 + ['B'] * 5000,
-    'var2': ['C'] * 2500 + ['D'] * 2500 + ['C'] * 2500 + ['D'] * 2500,
-    'expos': 1
-})
+data_basic = pd.DataFrame(
+    {
+        "var1": ["A"] * 5000 + ["B"] * 5000,
+        "var2": ["C"] * 2500 + ["D"] * 2500 + ["C"] * 2500 + ["D"] * 2500,
+        "expos": 1,
+    }
+)
 
-data_easy = pd.DataFrame({
-    'var1': ['A'] * 5000 + ['B'] * 5000,
-    'var2': ['C'] * 2500 + ['D'] * 2500 + ['C'] * 2500 + ['D'] * 2500,
-    'expos': np.tile(np.arange(0.1, 1.1, 0.1), 1000)
-})
+data_easy = pd.DataFrame(
+    {
+        "var1": ["A"] * 5000 + ["B"] * 5000,
+        "var2": ["C"] * 2500 + ["D"] * 2500 + ["C"] * 2500 + ["D"] * 2500,
+        "expos": np.tile(np.arange(0.1, 1.1, 0.1), 1000),
+    }
+)
 
-data_mod = pd.DataFrame({
-    'var1': ['A'] * 5000 + ['B'] * 5000,
-    'var2': ['C'] * 2500 + ['D'] * 2500 + ['C'] * 2500 + ['D'] * 2500,
-    'expos': np.round(np.random.uniform(size=10000), 4)
-})
+data_mod = pd.DataFrame(
+    {
+        "var1": ["A"] * 5000 + ["B"] * 5000,
+        "var2": ["C"] * 2500 + ["D"] * 2500 + ["C"] * 2500 + ["D"] * 2500,
+        "expos": np.round(np.random.uniform(size=10000), 4),
+    }
+)
 
-var_impact = pd.DataFrame({
-    'var1': ['A', 'B', 'A', 'B'],
-    'var2': ['C', 'C', 'D', 'D'],
-    'lambda_base': [0.3, 0.7, 1.3, 1.9]
-})
+var_impact = pd.DataFrame(
+    {
+        "var1": ["A", "B", "A", "B"],
+        "var2": ["C", "C", "D", "D"],
+        "lambda_base": [0.3, 0.7, 1.3, 1.9],
+    }
+)
+
 
 # %%
 def generate_claim_counts(dt: pd.DataFrame, var_impact: pd.DataFrame) -> pd.DataFrame:
@@ -118,11 +128,12 @@ def generate_claim_counts(dt: pd.DataFrame, var_impact: pd.DataFrame) -> pd.Data
     pd.DataFrame
         The input DataFrame augmented with lambda, claim_count, and claim_count_adjusted.
     """
-    dt = dt.merge(var_impact, on=['var1', 'var2'])
-    dt['lambda'] = dt['expos'] * dt['lambda_base']
-    dt['claim_count'] = [poisson.rvs(mu) for mu in dt['lambda']]
-    dt['claim_count_adjusted'] = dt['claim_count'] / dt['expos']
+    dt = dt.merge(var_impact, on=["var1", "var2"])
+    dt["lambda"] = dt["expos"] * dt["lambda_base"]
+    dt["claim_count"] = [poisson.rvs(mu) for mu in dt["lambda"]]
+    dt["claim_count_adjusted"] = dt["claim_count"] / dt["expos"]
     return dt
+
 
 # %%
 data_basic = generate_claim_counts(data_basic, var_impact)
@@ -135,12 +146,15 @@ data_mod = generate_claim_counts(data_mod, var_impact)
 # CHECKS
 print_table(
     "Data Basic Counts",
-    data_basic.groupby(['var1', 'var2', 'expos']).size().reset_index(name='N'),
+    data_basic.groupby(["var1", "var2", "expos"]).size().reset_index(name="N"),
 )
 print_table(
     "Data Easy Poisson Check",
-    data_easy.groupby(['var1', 'var2', 'expos', 'lambda'])['claim_count'].mean().reset_index(),
+    data_easy.groupby(["var1", "var2", "expos", "lambda"])["claim_count"]
+    .mean()
+    .reset_index(),
 )
+
 
 # %% [markdown]
 # # SOLUTION 1: init_score
@@ -162,35 +176,37 @@ def solution_1_predict(data_curr: pd.DataFrame) -> np.ndarray:
     np.ndarray
         The predicted rates (per unit of exposure).
     """
-    data_curr_recoded = data_curr[['var1', 'var2']].copy()
-    for col in ['var1', 'var2']:
+    data_curr_recoded = data_curr[["var1", "var2"]].copy()
+    for col in ["var1", "var2"]:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
-    
+
     dtrain = lgb.Dataset(
         data_curr_recoded.values,
-        label=data_curr['claim_count'].values,
-        init_score=np.log(np.fmax(data_curr['expos'].values, 1e-9)),
-        categorical_feature=[0, 1]
+        label=data_curr["claim_count"].values,
+        init_score=np.log(np.fmax(data_curr["expos"].values, 1e-9)),
+        categorical_feature=[0, 1],
     )
-    
+
     param = {
-        'objective': 'poisson',
-        'num_iterations': 100,
-        'learning_rate': 0.5,
-        'verbose': -1,
-        'boost_from_average': False  # Crucial for offset models
+        "objective": "poisson",
+        "num_iterations": 100,
+        "learning_rate": 0.5,
+        "verbose": -1,
+        "boost_from_average": False,  # Crucial for offset models
     }
-    
+
     lgb_model = lgb.train(param, dtrain)
-    return lgb_model.predict(data_curr_recoded.values)
+    return np.asarray(lgb_model.predict(data_curr_recoded.values))
+
 
 # %%
 predicted_counts_easy = solution_1_predict(data_easy)
-data_easy['sol_1_predict'] = predicted_counts_easy *  np.fmax(data_easy['expos'], 1e-9)
-data_easy['sol_1_predict_raw'] = predicted_counts_easy 
+data_easy["sol_1_predict"] = predicted_counts_easy * np.fmax(data_easy["expos"], 1e-9)
+data_easy["sol_1_predict_raw"] = predicted_counts_easy
 predicted_counts_mod = solution_1_predict(data_mod)
-data_mod['sol_1_predict'] = predicted_counts_mod * np.fmax(data_mod['expos'], 1e-9)
-data_mod['sol_1_predict_raw'] = predicted_counts_mod 
+data_mod["sol_1_predict"] = predicted_counts_mod * np.fmax(data_mod["expos"], 1e-9)
+data_mod["sol_1_predict_raw"] = predicted_counts_mod
+
 
 # %% [markdown]
 # # SOLUTION 1B: Tweedie
@@ -212,36 +228,42 @@ def solution_1b_predict(data_curr: pd.DataFrame) -> np.ndarray:
     np.ndarray
         The predicted totals. For p=1, this is equivalent to predicted counts.
     """
-    data_curr_recoded = data_curr[['var1', 'var2']].copy()
-    for col in ['var1', 'var2']:
+    data_curr_recoded = data_curr[["var1", "var2"]].copy()
+    for col in ["var1", "var2"]:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
-    
+
     dtrain = lgb.Dataset(
         data_curr_recoded.values,
-        label=data_curr['claim_count'].values,
-        init_score=np.log(np.fmax(data_curr['expos'].values, 1e-9)),
-        categorical_feature=[0, 1]
+        label=data_curr["claim_count"].values,
+        init_score=np.log(np.fmax(data_curr["expos"].values, 1e-9)),
+        categorical_feature=[0, 1],
     )
-    
+
     param = {
-        'objective': 'tweedie',
-        'tweedie_variance_power': 1,
-        'num_iterations': 100,
-        'learning_rate': 0.5,
-        'verbose': -1,
-        'boost_from_average': False  # Crucial for offset models
+        "objective": "tweedie",
+        "tweedie_variance_power": 1,
+        "num_iterations": 100,
+        "learning_rate": 0.5,
+        "verbose": -1,
+        "boost_from_average": False,  # Crucial for offset models
     }
-    
+
     lgb_model = lgb.train(param, dtrain)
-    return lgb_model.predict(data_curr_recoded.values)
+    return np.asarray(lgb_model.predict(data_curr_recoded.values))
+
 
 # %%
 predicted_counts_easy_1b = solution_1b_predict(data_easy)
-data_easy['sol_1b_predict'] = predicted_counts_easy_1b
-data_easy['sol_1b_predict_raw'] = predicted_counts_easy_1b / np.fmax(data_easy['expos'], 1e-9)
+data_easy["sol_1b_predict"] = predicted_counts_easy_1b
+data_easy["sol_1b_predict_raw"] = predicted_counts_easy_1b / np.fmax(
+    data_easy["expos"], 1e-9
+)
 predicted_counts_mod_1b = solution_1b_predict(data_mod)
-data_mod['sol_1b_predict'] = predicted_counts_mod_1b
-data_mod['sol_1b_predict_raw'] = predicted_counts_mod_1b / np.fmax(data_mod['expos'], 1e-9)
+data_mod["sol_1b_predict"] = predicted_counts_mod_1b
+data_mod["sol_1b_predict_raw"] = predicted_counts_mod_1b / np.fmax(
+    data_mod["expos"], 1e-9
+)
+
 
 # %% [markdown]
 # # SOLUTION 2: Adjusted claim counts with weights
@@ -264,32 +286,40 @@ def solution_2_predict(data_curr: pd.DataFrame) -> np.ndarray:
     np.ndarray
         The predicted rates.
     """
-    data_curr_recoded = data_curr[['var1', 'var2']].copy()
-    for col in ['var1', 'var2']:
+    data_curr_recoded = data_curr[["var1", "var2"]].copy()
+    for col in ["var1", "var2"]:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
-    
+
     dtrain = lgb.Dataset(
         data_curr_recoded.values,
-        label=data_curr['claim_count_adjusted'].values,
-        weight=data_curr['expos'].values,
-        categorical_feature=[0, 1]
+        label=data_curr["claim_count_adjusted"].values,
+        weight=data_curr["expos"].values,
+        categorical_feature=[0, 1],
     )
-    
+
     param = {
-        'objective': 'poisson',
-        'num_iterations': 100,
-        'learning_rate': 0.5,
-        'verbose': -1  # boost_from_average=True (default) is correct here
+        "objective": "poisson",
+        "num_iterations": 100,
+        "learning_rate": 0.5,
+        "verbose": -1,  # boost_from_average=True (default) is correct here
     }
-    
+
     lgb_model = lgb.train(param, dtrain)
-    return lgb_model.predict(data_curr_recoded.values)
+    return np.asarray(lgb_model.predict(data_curr_recoded.values))
+
 
 # %%
-data_easy['sol_2_predict_raw'] = solution_2_predict(data_easy)  # This is a predicted RATE
-data_easy['sol_2_predict'] = data_easy['sol_2_predict_raw'] * data_easy['expos']  # Convert to COUNT
-data_mod['sol_2_predict_raw'] = solution_2_predict(data_mod)    # This is a predicted RATE
-data_mod['sol_2_predict'] = data_mod['sol_2_predict_raw'] * data_mod['expos']    # Convert to COUNT
+data_easy["sol_2_predict_raw"] = solution_2_predict(
+    data_easy
+)  # This is a predicted RATE
+data_easy["sol_2_predict"] = (
+    data_easy["sol_2_predict_raw"] * data_easy["expos"]
+)  # Convert to COUNT
+data_mod["sol_2_predict_raw"] = solution_2_predict(data_mod)  # This is a predicted RATE
+data_mod["sol_2_predict"] = (
+    data_mod["sol_2_predict_raw"] * data_mod["expos"]
+)  # Convert to COUNT
+
 
 # %% [markdown]
 # # SOLUTION 3: Custom objective function
@@ -310,15 +340,17 @@ def solution_3_predict(data_curr: pd.DataFrame) -> np.ndarray:
     np.ndarray
         The predicted rates (per unit of exposure).
     """
-    data_curr_recoded = data_curr[['var1', 'var2']].copy()
-    for col in ['var1', 'var2']:
+    data_curr_recoded = data_curr[["var1", "var2"]].copy()
+    for col in ["var1", "var2"]:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
 
     # We use a closure to pass the exposure array to the objective function,
     # which is cleaner than using a global variable.
-    exposure_values = data_curr['expos'].values
+    exposure_values = data_curr["expos"].values
 
-    def custom_poisson_obj(y_pred: np.ndarray, data: lgb.Dataset) -> Tuple[np.ndarray, np.ndarray]:
+    def custom_poisson_obj(
+        y_pred: np.ndarray, data: lgb.Dataset
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Custom Poisson objective function with exposure offset.
 
         Parameters
@@ -347,26 +379,27 @@ def solution_3_predict(data_curr: pd.DataFrame) -> np.ndarray:
 
     dtrain = lgb.Dataset(
         data_curr_recoded.values,
-        label=data_curr['claim_count'].values,
-        categorical_feature=[0, 1]
+        label=data_curr["claim_count"].values,
+        categorical_feature=[0, 1],
     )
 
     param = {
-        'objective': custom_poisson_obj,
-        'num_iterations': 100,
-        'learning_rate': 0.5,
-        'verbose': -1,
-        'boost_from_average': False,
+        "objective": custom_poisson_obj,
+        "num_iterations": 100,
+        "learning_rate": 0.5,
+        "verbose": -1,
+        "boost_from_average": False,
     }
 
     lgb_model = lgb.train(param, dtrain)
-    return lgb_model.predict(data_curr_recoded.values)
+    return np.asarray(lgb_model.predict(data_curr_recoded.values))
+
 
 # %%
-data_easy['sol_3_predict_raw'] = solution_3_predict(data_easy)
-data_easy['sol_3_predict'] = np.exp(data_easy['sol_3_predict_raw']) * data_easy['expos']
-data_mod['sol_3_predict_raw'] = solution_3_predict(data_mod)
-data_mod['sol_3_predict'] = np.exp(data_mod['sol_3_predict_raw']) * data_mod['expos']
+data_easy["sol_3_predict_raw"] = solution_3_predict(data_easy)
+data_easy["sol_3_predict"] = np.exp(data_easy["sol_3_predict_raw"]) * data_easy["expos"]
+data_mod["sol_3_predict_raw"] = solution_3_predict(data_mod)
+data_mod["sol_3_predict"] = np.exp(data_mod["sol_3_predict_raw"]) * data_mod["expos"]
 
 # %%
 # ANALYSIS (example checks)
@@ -374,19 +407,19 @@ data_mod['sol_3_predict'] = np.exp(data_mod['sol_3_predict_raw']) * data_mod['ex
 emit("\n[bold]Analysis of Predicted Counts (should match lambda)[/bold]")
 for i in [1, 2, 3]:
     solution_check = (
-        data_easy.groupby('lambda')[f'sol_{i}_predict']
+        data_easy.groupby("lambda")[f"sol_{i}_predict"]
         .mean()
-        .reset_index(name='mean_predicted_count')
+        .reset_index(name="mean_predicted_count")
     )
     print_table(f"Solution {i} (Easy Data)", solution_check)
 
 
 agg_rows = [
-    ("Observed counts", data_mod['claim_count'].sum()),
-    ("Theoretical counts", data_mod['lambda'].sum()),
+    ("Observed counts", data_mod["claim_count"].sum()),
+    ("Theoretical counts", data_mod["lambda"].sum()),
 ]
 for i in [1, 2, 3]:
-    pred_sum = data_mod[f'sol_{i}_predict'].sum()
+    pred_sum = data_mod[f"sol_{i}_predict"].sum()
     agg_rows.append((f"Solution {i} predicted counts", pred_sum))
 print_table(
     "Aggregate Claim Count Comparison (Mod Data)",
@@ -395,7 +428,10 @@ print_table(
 
 
 equivalence_rows = []
-for sol_pair in [("sol_1_predict", "sol_2_predict"), ("sol_1_predict", "sol_3_predict")]:
+for sol_pair in [
+    ("sol_1_predict", "sol_2_predict"),
+    ("sol_1_predict", "sol_3_predict"),
+]:
     mismatches = data_easy[~np.isclose(data_easy[sol_pair[0]], data_easy[sol_pair[1]])]
     mismatches_mod = data_mod[~np.isclose(data_mod[sol_pair[0]], data_mod[sol_pair[1]])]
     equivalence_rows.append(

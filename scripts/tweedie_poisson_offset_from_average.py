@@ -9,9 +9,8 @@ We run two experiments:
 2. Tweedie totals with totals labels + offset log(exposure)
 """
 
-from typing import Dict, Optional, Tuple
-import numpy as np  
 import lightgbm as lgb
+import numpy as np
 from sklearn.metrics import mean_poisson_deviance, mean_tweedie_deviance
 
 try:
@@ -21,7 +20,7 @@ try:
 
     RICH_AVAILABLE = True
     console = Console()
-except Exception:
+except ImportError:
     RICH_AVAILABLE = False
     console = None
 
@@ -40,9 +39,9 @@ def _format_value(value: object) -> str:
     return str(value)
 
 
-def print_summary_table(title: str, rows: Tuple[Tuple[str, object], ...]) -> None:
+def print_summary_table(title: str, rows: tuple[tuple[str, object], ...]) -> None:
     """Print a two-column summary table."""
-    if not RICH_AVAILABLE:
+    if console is None:
         print(f"\n=== {title} ===")
         for key, value in rows:
             print(f"{key}: {_format_value(value)}")
@@ -55,7 +54,10 @@ def print_summary_table(title: str, rows: Tuple[Tuple[str, object], ...]) -> Non
         table.add_row(key, _format_value(value))
     console.print(table)
 
-def make_poisson_synth(n: int = 200_000) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+
+def make_poisson_synth(
+    n: int = 200_000,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Generate synthetic data for a Poisson regression model.
 
     Creates features, a highly variable exposure, a true underlying rate,
@@ -94,7 +96,10 @@ def make_poisson_synth(n: int = 200_000) -> Tuple[np.ndarray, np.ndarray, np.nda
 
     return X, exposure, rate, counts
 
-def make_tweedie_synth(n: int = 200_000, p: float = 1.5) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+
+def make_tweedie_synth(
+    n: int = 200_000, p: float = 1.5
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Generate synthetic data for a Tweedie regression model.
 
     Creates features, exposure, a true rate, and total claim amounts.
@@ -135,7 +140,7 @@ def make_tweedie_synth(n: int = 200_000, p: float = 1.5) -> Tuple[np.ndarray, np
     mean_tot = exposure * rate
     phi = 1.0  # dispersion scale
     # gamma with mean=mean_tot and variance=phi*mean_tot**p => shape=k, scale=theta => k*theta=mean, k*theta^2=var
-    var = phi * (mean_tot ** p)
+    var = phi * (mean_tot**p)
     theta = var / mean_tot
     k = mean_tot / theta
     # Avoid numerical issues
@@ -145,16 +150,17 @@ def make_tweedie_synth(n: int = 200_000, p: float = 1.5) -> Tuple[np.ndarray, np
 
     return X, exposure, rate, totals
 
+
 def fit_lgb_offset(
     X: np.ndarray,
     exposure: np.ndarray,
     label: np.ndarray,
     objective: str,
-    power: Optional[float] = None,
+    power: float | None = None,
     boost_from_average: bool = False,
     lr: float = 0.05,
     rounds: int = 400,
-) -> Tuple[lgb.Booster, np.ndarray]:
+) -> tuple[lgb.Booster, np.ndarray]:
     """Fit a LightGBM model using log(exposure) as an offset via init_score.
 
     Parameters
@@ -184,17 +190,28 @@ def fit_lgb_offset(
     eps = 1e-9
     init = np.log(np.maximum(exposure, eps))
     dtrain = lgb.Dataset(X, label=label, init_score=init, free_raw_data=True)
-    params = dict(objective=objective, learning_rate=lr, verbose=-1, num_leaves=31, max_depth=-1, min_data_in_leaf=50)
-    if objective == 'tweedie':
-        params['tweedie_variance_power'] = power
-    params['boost_from_average'] = boost_from_average
+    params = {
+        "objective": objective,
+        "learning_rate": lr,
+        "verbose": -1,
+        "num_leaves": 31,
+        "max_depth": -1,
+        "min_data_in_leaf": 50,
+    }
+    if objective == "tweedie":
+        params["tweedie_variance_power"] = power
+    params["boost_from_average"] = boost_from_average
     model = lgb.train(params, dtrain, num_boost_round=rounds)
-    pred_rate = model.predict(X)  # rate per exposure (given offset usage)
+    pred_rate = np.asarray(model.predict(X))  # rate per exposure (given offset usage)
     return model, pred_rate
 
+
 def summarize_poisson(
-    rate_true: np.ndarray, exposure: np.ndarray, counts: np.ndarray, rate_pred: np.ndarray
-) -> Dict[str, float]:
+    rate_true: np.ndarray,
+    exposure: np.ndarray,
+    counts: np.ndarray,
+    rate_pred: np.ndarray,
+) -> dict[str, float]:
     """Calculate and summarize metrics for a Poisson model.
 
     Computes the exposure-weighted mean Poisson deviance between true and
@@ -223,11 +240,21 @@ def summarize_poisson(
     # Compare aggregate counts
     agg_true = (rate_true * exposure).sum()
     agg_pred = (rate_pred * exposure).sum()
-    return dict(poisson_dev=dev, agg_true_counts=agg_true, agg_pred_counts=agg_pred, ratio=agg_pred/agg_true)
+    return {
+        "poisson_dev": dev,
+        "agg_true_counts": agg_true,
+        "agg_pred_counts": agg_pred,
+        "ratio": agg_pred / agg_true,
+    }
+
 
 def summarize_tweedie(
-    rate_true: np.ndarray, exposure: np.ndarray, totals: np.ndarray, rate_pred: np.ndarray, p: float
-) -> Dict[str, float]:
+    rate_true: np.ndarray,
+    exposure: np.ndarray,
+    totals: np.ndarray,
+    rate_pred: np.ndarray,
+    p: float,
+) -> dict[str, float]:
     """Calculate and summarize metrics for a Tweedie model.
 
     Computes the correctly weighted mean Tweedie deviance between true and
@@ -256,14 +283,20 @@ def summarize_tweedie(
     dev = mean_tweedie_deviance(rate_true, rate_pred, power=p, sample_weight=sw)
     agg_true = (rate_true * exposure).sum()
     agg_pred = (rate_pred * exposure).sum()
-    return dict(tweedie_dev=dev, agg_true_totals=agg_true, agg_pred_totals=agg_pred, ratio=agg_pred/agg_true)
+    return {
+        "tweedie_dev": dev,
+        "agg_true_totals": agg_true,
+        "agg_pred_totals": agg_pred,
+        "ratio": agg_pred / agg_true,
+    }
 
 
-def print_comparison(title: str, metrics_false: Dict[str, float], metrics_true: Dict[str, float]) -> None:
+def print_comparison(
+    title: str, metrics_false: dict[str, float], metrics_true: dict[str, float]
+) -> None:
     """Print a side-by-side summary for boost_from_average=False vs True."""
     rows = []
-    for key in metrics_false:
-        false_value = metrics_false[key]
+    for key, false_value in metrics_false.items():
         true_value = metrics_true[key]
         rows.extend(
             [
@@ -272,17 +305,24 @@ def print_comparison(title: str, metrics_false: Dict[str, float], metrics_true: 
             ]
         )
     if "ratio" in metrics_false:
-        rows.append(("ratio gap (True - False)", metrics_true["ratio"] - metrics_false["ratio"]))
+        rows.append(
+            ("ratio gap (True - False)", metrics_true["ratio"] - metrics_false["ratio"])
+        )
     print_summary_table(title, tuple(rows))
+
 
 # ===== Experiment A: Poisson counts + offset =====
 X, expA, rateA, countsA = make_poisson_synth(n=250_000)
 
-m_false, rate_pred_false = fit_lgb_offset(X, expA, countsA, objective='poisson', boost_from_average=False, lr=0.05, rounds=300)
-m_true,  rate_pred_true  = fit_lgb_offset(X, expA, countsA, objective='poisson', boost_from_average=True,  lr=0.05, rounds=300)
+m_false, rate_pred_false = fit_lgb_offset(
+    X, expA, countsA, objective="poisson", boost_from_average=False, lr=0.05, rounds=300
+)
+m_true, rate_pred_true = fit_lgb_offset(
+    X, expA, countsA, objective="poisson", boost_from_average=True, lr=0.05, rounds=300
+)
 
 sumA_false = summarize_poisson(rateA, expA, countsA, rate_pred_false)
-sumA_true  = summarize_poisson(rateA, expA, countsA, rate_pred_true)
+sumA_true = summarize_poisson(rateA, expA, countsA, rate_pred_true)
 
 print_comparison("Poisson Counts + Offset", sumA_false, sumA_true)
 
@@ -290,10 +330,28 @@ print_comparison("Poisson Counts + Offset", sumA_false, sumA_true)
 p = 1.5
 X, expB, rateB, totalsB = make_tweedie_synth(n=100_000, p=p)
 
-mt_false, rate_pred_false_B = fit_lgb_offset(X, expB, totalsB, objective='tweedie', power=p, boost_from_average=False, lr=0.05, rounds=400)
-mt_true,  rate_pred_true_B  = fit_lgb_offset(X, expB, totalsB, objective='tweedie', power=p, boost_from_average=True,  lr=0.05, rounds=400)
+mt_false, rate_pred_false_B = fit_lgb_offset(
+    X,
+    expB,
+    totalsB,
+    objective="tweedie",
+    power=p,
+    boost_from_average=False,
+    lr=0.05,
+    rounds=400,
+)
+mt_true, rate_pred_true_B = fit_lgb_offset(
+    X,
+    expB,
+    totalsB,
+    objective="tweedie",
+    power=p,
+    boost_from_average=True,
+    lr=0.05,
+    rounds=400,
+)
 
 sumB_false = summarize_tweedie(rateB, expB, totalsB, rate_pred_false_B, p=p)
-sumB_true  = summarize_tweedie(rateB, expB, totalsB, rate_pred_true_B, p=p)
+sumB_true = summarize_tweedie(rateB, expB, totalsB, rate_pred_true_B, p=p)
 
 print_comparison("Tweedie Totals + Offset (p=1.5)", sumB_false, sumB_true)
