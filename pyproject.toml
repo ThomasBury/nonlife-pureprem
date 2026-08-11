@@ -12,6 +12,8 @@ dependencies = [
     "pyarrow>=22.0.0",
     "rich>=13.9.4",
     "scikit-learn>=1.7.2",
+    "xgboost>=2.0.0",
+    "statsmodels>=0.14.6",
 ]
 
 [dependency-groups]
