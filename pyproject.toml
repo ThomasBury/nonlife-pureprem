@@ -1,10 +1,11 @@
 [project]
 name = "tweedie-regr"
 version = "0.1.0"
-description = "Add your description here"
+description = "French MTPL frequency, severity, and pure-premium tutorial"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "glum>=3.4.1",
     "lightgbm>=4.6.0",
     "matplotlib>=3.10.6",
     "numpy>=2.3.3",
@@ -12,12 +13,11 @@ dependencies = [
     "pyarrow>=22.0.0",
     "rich>=13.9.4",
     "scikit-learn>=1.7.2",
-    "xgboost>=2.0.0",
-    "statsmodels>=0.14.6",
 ]
 
 [dependency-groups]
 dev = [
+    "ipykernel>=6.29.5",
     "ruff>=0.16.0",
     "ty>=0.0.64",
 ]

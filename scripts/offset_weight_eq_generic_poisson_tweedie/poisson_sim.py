@@ -146,7 +146,9 @@ data_mod = generate_claim_counts(data_mod, var_impact)
 # CHECKS
 print_table(
     "Data Basic Counts",
-    data_basic.groupby(["var1", "var2", "expos"]).size().reset_index(name="N"),
+    pd.DataFrame(
+        data_basic.groupby(["var1", "var2", "expos"]).size(), columns=["N"]
+    ).reset_index(),
 )
 print_table(
     "Data Easy Poisson Check",

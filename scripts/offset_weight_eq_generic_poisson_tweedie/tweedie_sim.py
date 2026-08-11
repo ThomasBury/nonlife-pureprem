@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Tweedie GLM with exposure: rigorous implementations and equivalence checks.
 

@@ -105,8 +105,6 @@ Consequently: $M_i = e_i mu_i$
 
 = 2. Frequency: rate versus expected count
 
-== Frequency: rate versus expected count
-
 Assume claim arrivals follow a Poisson process conditional on the policy
 characteristics $X_i$. Let
 
@@ -198,8 +196,6 @@ Tweedie distribution for $1 < p < 2$; see Jørgensen and de Souza [2] and
 Delong, Lindholm and Wüthrich [1].
 
 = 5. Mean aggregate claim cost
-
-== Mean aggregate claim cost
 
 Condition first on the number of claims. Given $N_i$,
 
@@ -523,54 +519,6 @@ model.fit(
 when the model is `TweedieRegressor` or a weighted Tweedie objective such as
 LightGBM's Tweedie regression. The current scikit-learn insurance example
 uses exactly this pure-premium construction and exposure weighting [6].
-
-== Practical implementation
-
-#grid(
-  columns: 2,
-  gutter: 1em,
-  [
-    *scikit-learn* \
-    ```python
-    from sklearn.linear_model \
-      import TweedieRegressor
-
-    y = total_claim_amount / exposure
-
-    model = TweedieRegressor(
-        power=p,
-        link="log",
-        alpha=0.0,
-    )
-
-    model.fit(
-        X, y,
-        sample_weight=exposure,
-    )
-    ```
-  ],
-  [
-    *LightGBM* \
-    ```python
-    import lightgbm as lgb
-
-    y = total_claim_amount / exposure
-
-    model = lgb.LGBMRegressor(
-        objective="tweedie",
-        tweedie_variance_power=p,
-    )
-
-    model.fit(
-        X, y,
-        sample_weight=exposure,
-    )
-    ```
-  ],
-)
-
-For actuarial interpretation: $hat(mu)_i$ is the predicted pure-premium rate
-and $hat(M)_i = e_i hat(mu)_i$ is the predicted aggregate loss.
 
 = 17. The same result from the Tweedie likelihood
 
