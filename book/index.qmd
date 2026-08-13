@@ -1,0 +1,52 @@
+---
+title: "Introduction"
+---
+
+# Offset–Weight Equivalence in Non-Life Pricing
+
+This book is an actuarial pricing tutorial built around the French freMTPL2
+data. It follows the pricing workflow in order:
+
+1. define positive paid claims and cap each claim at EUR 100,000;
+2. model claim frequency;
+3. model claim-weighted Gamma severity;
+4. multiply frequency and severity into a decomposed pure premium;
+5. model pure premium directly with Tweedie regression;
+6. compare calibration, discrimination, lift, and portfolio balance on an
+   untouched test set.
+
+## Targets and Weights
+
+| Component | Target | Sample weight | Rows |
+| --- | --- | --- | --- |
+| Frequency | ClaimNb / Exposure | Exposure | All policies |
+| Severity | ClaimAmountCapped / ClaimNb | ClaimNb | Claim-bearing policies |
+| Pure premium | ClaimAmountCapped / Exposure | Exposure | All policies |
+
+The tutorial produces four final pure-premium predictions:
+
+- GLUM frequency × GLUM severity;
+- LightGBM frequency × LightGBM severity;
+- direct GLUM Tweedie;
+- direct LightGBM Tweedie.
+
+## Companion chapters
+
+The **Pure-premium tutorial** chapter walks through the full real-data comparison.
+
+The **Poisson offset–weight** and **Tweedie offset–weight** chapters provide
+synthetic-data empirical verification that counts + offset ≡ rates + weights.
+
+The **Boost from average** chapter isolates the operational caveat that
+`boost_from_average` must be disabled when using `init_score = log(exposure)`.
+
+## Setup
+
+The project requires Python 3.14 and uses [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync
+uv run pure-premium          # CLI entry point
+uv run pytest tests/         # unit tests
+cd book && quarto render     # render this book
+```

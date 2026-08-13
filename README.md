@@ -11,9 +11,9 @@ freMTPL2 data. The main tutorial follows the pricing workflow in order:
 6. compare calibration, discrimination, lift, and portfolio balance on an
    untouched test set.
 
-The main implementation is
-[scripts/pure_premium/pure_premium.py](scripts/pure_premium/pure_premium.py).
-It is import-safe: downloads and fitting happen only through main().
+The library lives in `src/tweedie_regr/` (standard `src` layout, installed
+editably by `uv sync`). The interactive tutorials are rendered as a
+[Quarto book](https://quarto.org/) under `book/`.
 
 ## Targets and Weights
 
@@ -41,33 +41,41 @@ The project requires Python 3.14 and uses uv:
 
 ```powershell
 uv sync
-uv run python scripts/pure_premium/pure_premium.py
+uv run pure-premium                # CLI entry point
+uv run pure-premium --n-samples 10000  # quick smoke run
 ```
 
-The OpenML datasets are downloaded on first run. For a reduced local smoke run:
+The OpenML datasets are downloaded on first run.
+
+Run the tests and linters:
 
 ```powershell
-uv run python scripts/pure_premium/pure_premium.py --n-samples 10000 --n-alphas 3 --max-rounds 20 --early-stopping-rounds 5 --output-dir artifacts/smoke
-```
-
-Run the network-free checks with:
-
-```powershell
+uv run python -m pytest tests/ -v
 uv run ruff check .
 uv run ruff format --check .
-uv run ty check
-uv run python -m unittest discover -s tests -v
 ```
-## Interactive Window
 
-Open [scripts/pure_premium/pure_premium_interactive.py](scripts/pure_premium/pure_premium_interactive.py)
-in VS Code, select the project kernel, then use **Run Current File in
-Interactive Window**. The `# %%` cells use the complete data by default and
-render the Rich tables plus temporary figures inline.
+## Quarto Book
 
-The companion distinguishes accuracy within response family, ranking via Gini
-and low-to-high Lorenz dominance, portfolio calibration, and exposure-balanced
-single and head-to-head double lift.
+The interactive tutorials live in `book/` as `.qmd` chapters:
+
+```powershell
+cd book
+quarto render   # render to book/_book/
+quarto preview  # live preview
+```
+
+> **Windows + venv:** Quarto ships its own Python; pin it to the project venv
+> so the Jupyter kernel finds the installed packages (`nbformat`,
+> `ipykernel`, `tweedie_regr`):
+> ```powershell
+> $env:QUARTO_PYTHON = "..\.venv\Scripts\python.exe"
+> quarto render
+> ```
+
+Chapters cover the full pricing comparison, Poisson and Tweedie
+offset-weight equivalence, the `boost_from_average` caveat, and the
+underlying compound Poisson-Gamma theory.
 
 ## Outputs
 
@@ -92,18 +100,14 @@ evidence without automatic model-superiority or universal calibration verdicts.
 ## Companion Material
 
 The main pricing tutorial uses exposure as the rate-model weight under the
-actuarial risk-volume convention. The companion note
-[docs/compound_poisson_tweedie_pure_premium.md](docs/compound_poisson_tweedie_pure_premium.md)
+actuarial risk-volume convention. The theory chapter
+([book/theory.qmd](book/theory.qmd))
 derives the generic total-offset/rate-weight equivalence under a different
 dispersion convention, where the exact Tweedie rate weight is
-exposure^(2-p). The distinction is linked here instead of re-derived in the
-main tutorial.
+exposure^(2-p).
 
-Focused companion scripts remain available:
+Focused companion chapters in the book:
 
-- [scripts/offset_weight_eq_generic_poisson_tweedie/poisson_sim.py](scripts/offset_weight_eq_generic_poisson_tweedie/poisson_sim.py)
-- [scripts/offset_weight_eq_generic_poisson_tweedie/tweedie_sim.py](scripts/offset_weight_eq_generic_poisson_tweedie/tweedie_sim.py)
-- [scripts/pure_premium/tweedie_poisson_offset_from_average.py](scripts/pure_premium/tweedie_poisson_offset_from_average.py)
-
-The companion documents remain mathematically independent of the main
-frequency/severity pricing workflow.
+- [book/poisson_offset_weight.qmd](book/poisson_offset_weight.qmd) — Poisson offset-weight equivalence
+- [book/tweedie_offset_weight.qmd](book/tweedie_offset_weight.qmd) — Tweedie offset-weight equivalence
+- [book/boost_from_average.qmd](book/boost_from_average.qmd) — `boost_from_average` caveat

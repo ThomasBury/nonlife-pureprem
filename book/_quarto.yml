@@ -1,0 +1,24 @@
+project:
+  type: book
+  output-dir: _book
+
+book:
+  title: "Offset–Weight Equivalence in Non-Life Pricing"
+  author: "Thomas Bury"
+  chapters:
+    - index.qmd
+    - theory.qmd
+    - pure_premium_tutorial.qmd
+    - poisson_offset_weight.qmd
+    - tweedie_offset_weight.qmd
+    - boost_from_average.qmd
+
+format:
+  html:
+    theme: cosmo
+    code-fold: false
+    toc: true
+
+execute:
+  enabled: true
+  freeze: auto

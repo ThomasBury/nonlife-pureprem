@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Quarto book cache and output
+/.quarto/
+**/*.quarto_ipynb
+**/*.quarto_ipynb_*
+artifacts/book/
