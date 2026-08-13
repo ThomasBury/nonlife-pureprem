@@ -2,8 +2,6 @@
 title: "Tweedie Offset–Weight Equivalence"
 ---
 
-# Tweedie GLM with exposure: implementations and equivalence checks
-
 This chapter provides:
 
 - A data generator for Tweedie totals with exposure

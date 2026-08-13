@@ -3,7 +3,7 @@ project:
   output-dir: _book
 
 book:
-  title: "Offset–Weight Equivalence in Non-Life Pricing"
+  title: "Pure-Premium Estimation in Non-Life Pricing"
   author: "Thomas Bury"
   chapters:
     - index.qmd

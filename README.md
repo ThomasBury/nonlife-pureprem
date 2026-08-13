@@ -65,13 +65,13 @@ pinned to the project virtual environment.
 POSIX:
 
 ```sh
-QUARTO_PYTHON="$PWD/.venv/bin/python" quarto render book
+QUARTO_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" quarto render book
 ```
 
 PowerShell:
 
 ```powershell
-$env:QUARTO_PYTHON = (Resolve-Path ".venv\Scripts\python.exe").Path
+$env:QUARTO_PYTHON = uv run python -c "import sys; print(sys.executable)"
 quarto render book
 ```
 
@@ -79,6 +79,12 @@ quarto render book
 
 Chapters cover the full pricing comparison, Poisson and Tweedie offset-weight
 equivalence, and the underlying compound Poisson-Gamma theory.
+
+For a fresh evaluation of the tutorial, do this from the repository root:
+
+```sh
+QUARTO_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" quarto render book --no-cache
+```
 
 ## Outputs
 

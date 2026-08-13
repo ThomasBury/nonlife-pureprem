@@ -49,13 +49,13 @@ POSIX:
 uv sync
 uv run pure-premium          # CLI entry point
 uv run pytest tests/         # unit tests
-QUARTO_PYTHON="$PWD/.venv/bin/python" quarto render book
+QUARTO_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" quarto render book
 ```
 
 PowerShell:
 
 ```powershell
-$env:QUARTO_PYTHON = (Resolve-Path ".venv\Scripts\python.exe").Path
+$env:QUARTO_PYTHON = uv run python -c "import sys; print(sys.executable)"
 quarto render book
 ```
 

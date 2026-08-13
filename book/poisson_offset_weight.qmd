@@ -2,8 +2,6 @@
 title: "Poisson Offset–Weight Equivalence"
 ---
 
-# Synthetic Poisson exposure tutorial
-
 This chapter is intentionally small and discrete. It shows three equivalent ways
 to teach the Poisson case with exposure:
 
