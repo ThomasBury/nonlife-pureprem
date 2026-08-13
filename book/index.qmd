@@ -37,16 +37,26 @@ The **Pure-premium tutorial** chapter walks through the full real-data compariso
 The **Poisson offset–weight** and **Tweedie offset–weight** chapters provide
 synthetic-data empirical verification that counts + offset ≡ rates + weights.
 
-The **Boost from average** chapter isolates the operational caveat that
-`boost_from_average` must be disabled when using `init_score = log(exposure)`.
-
 ## Setup
 
-The project requires Python 3.14 and uses [uv](https://docs.astral.sh/uv/):
+The project requires Python 3.14 and uses [uv](https://docs.astral.sh/uv/).
+Install the Quarto CLI separately, then run `uv sync` and render from the
+repository root with the project virtual environment selected explicitly.
+
+POSIX:
 
 ```bash
 uv sync
 uv run pure-premium          # CLI entry point
 uv run pytest tests/         # unit tests
-cd book && quarto render     # render this book
+QUARTO_PYTHON="$PWD/.venv/bin/python" quarto render book
 ```
+
+PowerShell:
+
+```powershell
+$env:QUARTO_PYTHON = (Resolve-Path ".venv\Scripts\python.exe").Path
+quarto render book
+```
+
+`freeze: auto` reruns chapters when their source changes during project renders.

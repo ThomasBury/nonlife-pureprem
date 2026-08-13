@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-pure-premium = "tweedie_regr.pure_premium:main"
+pure-premium = "tweedie_regr.pure_premium:cli"
 
 [dependency-groups]
 dev = [

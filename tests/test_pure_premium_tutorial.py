@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import lightgbm as lgb
 import numpy as np
@@ -6,6 +8,7 @@ import pandas as pd
 from glum import GeneralizedLinearRegressor, TweedieDistribution
 
 from tweedie_regr.pure_premium import (
+    cli,
     exposure_balanced_double_lift_table,
     exposure_balanced_lift_table,
     lift_diagnostics,
@@ -62,6 +65,31 @@ class PurePremiumTutorialTest(unittest.TestCase):
         np.testing.assert_allclose(
             self.data["PurePremium"] * self.data["Exposure"],
             self.data["ClaimAmountCapped"],
+        )
+
+    @patch("tweedie_regr.pure_premium.main")
+    def test_cli_parses_and_forwards_options(self, mocked_main) -> None:
+        cli(
+            [
+                "--n-samples",
+                "100",
+                "--n-alphas",
+                "5",
+                "--max-rounds",
+                "20",
+                "--early-stopping-rounds",
+                "3",
+                "--output-dir",
+                "custom-output",
+            ]
+        )
+
+        mocked_main.assert_called_once_with(
+            n_samples=100,
+            n_alphas=5,
+            max_rounds=20,
+            early_stopping_rounds=3,
+            output_dir=Path("custom-output"),
         )
 
     def test_target_and_weight_definitions(self) -> None:

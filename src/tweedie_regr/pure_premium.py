@@ -1091,7 +1091,7 @@ def main(
     print(f"\nSaved tables and core figures to {output_dir}")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the small set of controls useful for tutorial smoke runs."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n-samples", type=int)
@@ -1107,11 +1107,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("artifacts/pure_premium"),
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-if __name__ == "__main__":
-    arguments = parse_args()
+def cli(argv: list[str] | None = None) -> None:
+    """Parse command-line options and run the tutorial."""
+    arguments = parse_args(argv)
     main(
         n_samples=arguments.n_samples,
         n_alphas=arguments.n_alphas,
@@ -1119,3 +1120,7 @@ if __name__ == "__main__":
         early_stopping_rounds=arguments.early_stopping_rounds,
         output_dir=arguments.output_dir,
     )
+
+
+if __name__ == "__main__":
+    cli()

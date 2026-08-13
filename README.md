@@ -57,25 +57,28 @@ uv run ruff format --check .
 
 ## Quarto Book
 
-The interactive tutorials live in `book/` as `.qmd` chapters:
+The interactive tutorials live in `book/` as `.qmd` chapters. The Quarto CLI
+is an external prerequisite and must be installed separately from the Python
+environment. After `uv sync`, render from the repository root with Quarto
+pinned to the project virtual environment.
 
-```powershell
-cd book
-quarto render   # render to book/_book/
-quarto preview  # live preview
+POSIX:
+
+```sh
+QUARTO_PYTHON="$PWD/.venv/bin/python" quarto render book
 ```
 
-> **Windows + venv:** Quarto ships its own Python; pin it to the project venv
-> so the Jupyter kernel finds the installed packages (`nbformat`,
-> `ipykernel`, `tweedie_regr`):
-> ```powershell
-> $env:QUARTO_PYTHON = "..\.venv\Scripts\python.exe"
-> quarto render
-> ```
+PowerShell:
 
-Chapters cover the full pricing comparison, Poisson and Tweedie
-offset-weight equivalence, the `boost_from_average` caveat, and the
-underlying compound Poisson-Gamma theory.
+```powershell
+$env:QUARTO_PYTHON = (Resolve-Path ".venv\Scripts\python.exe").Path
+quarto render book
+```
+
+`freeze: auto` remains enabled, so project renders rerun changed chapters.
+
+Chapters cover the full pricing comparison, Poisson and Tweedie offset-weight
+equivalence, and the underlying compound Poisson-Gamma theory.
 
 ## Outputs
 
@@ -110,4 +113,3 @@ Focused companion chapters in the book:
 
 - [book/poisson_offset_weight.qmd](book/poisson_offset_weight.qmd) — Poisson offset-weight equivalence
 - [book/tweedie_offset_weight.qmd](book/tweedie_offset_weight.qmd) — Tweedie offset-weight equivalence
-- [book/boost_from_average.qmd](book/boost_from_average.qmd) — `boost_from_average` caveat
