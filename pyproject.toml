@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "tweedie-regr"
 version = "0.1.0"
@@ -15,9 +19,14 @@ dependencies = [
     "scikit-learn>=1.7.2",
 ]
 
+[project.scripts]
+pure-premium = "tweedie_regr.pure_premium:main"
+
 [dependency-groups]
 dev = [
     "ipykernel>=6.29.5",
+    "jupyter>=1.1.0",
+    "pytest>=9.1.1",
     "ruff>=0.16.0",
     "ty>=0.0.64",
 ]

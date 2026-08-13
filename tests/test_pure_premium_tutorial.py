@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from glum import GeneralizedLinearRegressor, TweedieDistribution
 
-from scripts.pure_premium.pure_premium import (
+from tweedie_regr.pure_premium import (
     exposure_balanced_double_lift_table,
     exposure_balanced_lift_table,
     lift_diagnostics,

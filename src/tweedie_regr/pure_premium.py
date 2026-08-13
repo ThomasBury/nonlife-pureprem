@@ -18,7 +18,7 @@ Pure premium      ClaimAmountCapped / Exposure     Exposure
 ================  ===============================  ============
 
 The generic offset/weight identity under another dispersion convention is kept
-in docs/compound_poisson_tweedie_pure_premium.md.
+in book/theory.qmd.
 """
 
 from __future__ import annotations
