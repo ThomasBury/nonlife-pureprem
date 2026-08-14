@@ -13,7 +13,8 @@ freMTPL2 data. The main tutorial follows the pricing workflow in order:
 
 The library lives in `src/tweedie_regr/` (standard `src` layout, installed
 editably by `uv sync`). The interactive tutorials are rendered as a
-[Quarto book](https://quarto.org/) under `book/`.
+[Quarto book](https://quarto.org/) under `book/`, published at
+[thomasbury.github.io/offset_weight_equivalence](https://thomasbury.github.io/offset_weight_equivalence/).
 
 ## Targets and Weights
 
@@ -76,6 +77,9 @@ quarto render book
 ```
 
 `freeze: auto` remains enabled, so project renders rerun changed chapters.
+Before merging a change that alters an executable chapter or its results, run
+the full local render and commit the refreshed `book/_freeze/` results with it.
+GitHub Pages renders with `--no-execute` and publishes those committed results.
 
 Chapters cover the full pricing comparison, Poisson and Tweedie offset-weight
 equivalence, and the underlying compound Poisson-Gamma theory.
