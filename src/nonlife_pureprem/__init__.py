@@ -1,6 +1,6 @@
 """French MTPL pricing tutorial: frequency, severity, and pure premium."""
 
-from tweedie_regr.pure_premium import (
+from nonlife_pureprem.pure_premium import (
     CATEGORICAL_FEATURES,
     LIGHTGBM_FEATURES,
     RATING_FORMULA,

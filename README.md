@@ -1,4 +1,4 @@
-# French MTPL Frequency, Severity, and Pure Premium
+# Non-Life Pure-Premium Pricing
 
 This repository is an actuarial pricing tutorial built around the French
 freMTPL2 data. The main tutorial follows the pricing workflow in order:
@@ -11,10 +11,10 @@ freMTPL2 data. The main tutorial follows the pricing workflow in order:
 6. compare calibration, discrimination, lift, and portfolio balance on an
    untouched test set.
 
-The library lives in `src/tweedie_regr/` (standard `src` layout, installed
+The library lives in `src/nonlife_pureprem/` (standard `src` layout, installed
 editably by `uv sync`). The interactive tutorials are rendered as a
 [Quarto book](https://quarto.org/) under `book/`, published at
-[thomasbury.github.io/offset_weight_equivalence](https://thomasbury.github.io/offset_weight_equivalence/).
+[thomasbury.github.io/nonlife-pureprem](https://thomasbury.github.io/nonlife-pureprem/).
 
 ## Targets and Weights
 

@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from IPython.display import Image, display
 
-from tweedie_regr import (
+from nonlife_pureprem import (
     TARGET_SPECS,
     coefficient_relativity_table,
     evaluate_predictions,

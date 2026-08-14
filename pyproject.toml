@@ -3,9 +3,9 @@ requires = ["uv_build>=0.8.8,<0.9.0"]
 build-backend = "uv_build"
 
 [project]
-name = "tweedie-regr"
+name = "nonlife-pureprem"
 version = "0.1.0"
-description = "French MTPL frequency, severity, and pure-premium tutorial"
+description = "Non-life pure-premium pricing tutorial using French MTPL data."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-pure-premium = "tweedie_regr.pure_premium:cli"
+pure-premium = "nonlife_pureprem.pure_premium:cli"
 
 [dependency-groups]
 dev = [

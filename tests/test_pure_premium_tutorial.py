@@ -13,7 +13,7 @@ from glum import (
     TweedieDistribution,
 )
 
-from tweedie_regr.pure_premium import (
+from nonlife_pureprem.pure_premium import (
     cli,
     evaluate_predictions,
     exposure_balanced_double_lift_table,
@@ -111,7 +111,7 @@ class PurePremiumTutorialTest(unittest.TestCase):
             self.data["ClaimAmountCapped"],
         )
 
-    @patch("tweedie_regr.pure_premium.main")
+    @patch("nonlife_pureprem.pure_premium.main")
     def test_cli_parses_and_forwards_options(self, mocked_main) -> None:
         cli(
             [
@@ -333,7 +333,7 @@ class PurePremiumTutorialTest(unittest.TestCase):
         data["VehBrand"] = data["VehBrand"].cat.remove_unused_categories()
         powers = (1.3, 1.7)
         with patch(
-            "tweedie_regr.pure_premium.RATING_FORMULA",
+            "nonlife_pureprem.pure_premium.RATING_FORMULA",
             "VehAge + DrivAge + LogDensity",
         ):
             selected, profile = select_tweedie_power(
