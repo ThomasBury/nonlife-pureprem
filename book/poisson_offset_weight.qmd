@@ -1,45 +1,34 @@
-"""Synthetic Poisson exposure tutorial.
+---
+title: "Poisson Offset–Weight Equivalence"
+---
 
-This script is intentionally small and discrete. It shows three equivalent ways
+This chapter is intentionally small and discrete. It shows three equivalent ways
 to teach the Poisson case with exposure:
 
-1. counts + offset via ``init_score = log(exposure)``
-2. rates + weights via ``weight = exposure``
+1. counts + offset via `init_score = log(exposure)`
+2. rates + weights via `weight = exposure`
 3. a custom objective that injects the offset directly in the gradients
 
 Compared with the main real-data tutorial, this file keeps the feature space and
 data-generating process simple enough that the equivalence is easy to inspect by
-eye in the terminal output.
-"""
+eye in the output.
 
-# %%
-
+```{python}
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
 from scipy.stats import poisson
 
-try:
-    from rich import box
-    from rich.console import Console
-    from rich.table import Table
+from rich import box
+from rich.console import Console
+from rich.table import Table
 
-    RICH_AVAILABLE = True
-    console = Console()
-except ImportError:
-    RICH_AVAILABLE = False
-    console = None
-
-# %%
-# Set seed for reproducibility
+console = Console()
 np.random.seed(100)
 
 
 def emit(message: str) -> None:
     """Print a message with Rich when available."""
-    if console is None:
-        print(message)
-        return
     console.print(message)
 
 
@@ -56,12 +45,7 @@ def _format_value(value: object) -> str:
 
 
 def print_table(title: str, df: pd.DataFrame) -> None:
-    """Render a DataFrame as a Rich table when possible."""
-    if console is None:
-        print(f"\n=== {title} ===")
-        print(df)
-        return
-
+    """Render a DataFrame as a Rich table."""
     table = Table(title=title, box=box.SIMPLE_HEAVY, header_style="bold magenta")
     numeric_cols = {col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])}
     for col in df.columns:
@@ -69,12 +53,11 @@ def print_table(title: str, df: pd.DataFrame) -> None:
     for _, row in df.iterrows():
         table.add_row(*[_format_value(row[col]) for col in df.columns])
     console.print(table)
+```
 
+## Data generation
 
-# %% [markdown]
-# # DATA GENERATION
-# %%
-# DATA GENERATION
+```{python}
 data_basic = pd.DataFrame(
     {
         "var1": ["A"] * 5000 + ["B"] * 5000,
@@ -98,6 +81,7 @@ data_mod = pd.DataFrame(
         "expos": np.round(np.random.uniform(size=10000), 4),
     }
 )
+data_mod = data_mod.loc[data_mod["expos"] > 0].copy()
 
 var_impact = pd.DataFrame(
     {
@@ -108,26 +92,8 @@ var_impact = pd.DataFrame(
 )
 
 
-# %%
 def generate_claim_counts(dt: pd.DataFrame, var_impact: pd.DataFrame) -> pd.DataFrame:
-    """Generate claim counts based on exposure and base lambda.
-
-    Merges the base data with feature impacts to get a base lambda,
-    calculates the expected claim count (lambda) as `expos * lambda_base`,
-    and then simulates the actual claim counts from a Poisson distribution.
-
-    Parameters
-    ----------
-    dt : pd.DataFrame
-        The input DataFrame with features and exposure.
-    var_impact : pd.DataFrame
-        A DataFrame mapping feature combinations to a `lambda_base`.
-
-    Returns
-    -------
-    pd.DataFrame
-        The input DataFrame augmented with lambda, claim_count, and claim_count_adjusted.
-    """
+    """Generate claim counts from exposure × base lambda via Poisson draws."""
     dt = dt.merge(var_impact, on=["var1", "var2"])
     dt["lambda"] = dt["expos"] * dt["lambda_base"]
     dt["claim_count"] = [poisson.rvs(mu) for mu in dt["lambda"]]
@@ -135,18 +101,19 @@ def generate_claim_counts(dt: pd.DataFrame, var_impact: pd.DataFrame) -> pd.Data
     return dt
 
 
-# %%
 data_basic = generate_claim_counts(data_basic, var_impact)
 data_easy = generate_claim_counts(data_easy, var_impact)
 data_mod = generate_claim_counts(data_mod, var_impact)
+```
 
-# %% [markdown]
-# # CHECKS
-# %%
-# CHECKS
+## Checks
+
+```{python}
 print_table(
     "Data Basic Counts",
-    data_basic.groupby(["var1", "var2", "expos"]).size().reset_index(name="N"),
+    pd.DataFrame(
+        data_basic.groupby(["var1", "var2", "expos"]).size(), columns=["N"]
+    ).reset_index(),
 )
 print_table(
     "Data Easy Poisson Check",
@@ -154,28 +121,13 @@ print_table(
     .mean()
     .reset_index(),
 )
+```
 
+## Solution 1: init_score (counts + offset)
 
-# %% [markdown]
-# # SOLUTION 1: init_score
-# %%
-# SOLUTION 1: init_score
+```{python}
 def solution_1_predict(data_curr: pd.DataFrame) -> np.ndarray:
-    """Train a Poisson LightGBM model using log(exposure) as an offset.
-
-    The offset is passed via the `init_score` parameter. `boost_from_average`
-    is set to False, which is crucial for offset models.
-
-    Parameters
-    ----------
-    data_curr : pd.DataFrame
-        The training data, containing features, 'claim_count', and 'expos'.
-
-    Returns
-    -------
-    np.ndarray
-        The predicted rates (per unit of exposure).
-    """
+    """Poisson LightGBM with log(exposure) as init_score offset."""
     data_curr_recoded = data_curr[["var1", "var2"]].copy()
     for col in ["var1", "var2"]:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
@@ -192,42 +144,26 @@ def solution_1_predict(data_curr: pd.DataFrame) -> np.ndarray:
         "num_iterations": 100,
         "learning_rate": 0.5,
         "verbose": -1,
-        "boost_from_average": False,  # Crucial for offset models
+        "boost_from_average": False,  # crucial for offset models
     }
 
     lgb_model = lgb.train(param, dtrain)
     return np.asarray(lgb_model.predict(data_curr_recoded.values))
 
 
-# %%
 predicted_counts_easy = solution_1_predict(data_easy)
 data_easy["sol_1_predict"] = predicted_counts_easy * np.fmax(data_easy["expos"], 1e-9)
 data_easy["sol_1_predict_raw"] = predicted_counts_easy
 predicted_counts_mod = solution_1_predict(data_mod)
 data_mod["sol_1_predict"] = predicted_counts_mod * np.fmax(data_mod["expos"], 1e-9)
 data_mod["sol_1_predict_raw"] = predicted_counts_mod
+```
 
+## Solution 1B: Tweedie(p=1) + offset
 
-# %% [markdown]
-# # SOLUTION 1B: Tweedie
-# %%
-# SOLUTION 1B: Tweedie
+```{python}
 def solution_1b_predict(data_curr: pd.DataFrame) -> np.ndarray:
-    """Train a Tweedie(p=1) LightGBM model using log(exposure) as an offset.
-
-    This is equivalent to the Poisson model in Solution 1. The offset is
-    passed via `init_score`. `boost_from_average` is set to False.
-
-    Parameters
-    ----------
-    data_curr : pd.DataFrame
-        The training data, containing features, 'claim_count', and 'expos'.
-
-    Returns
-    -------
-    np.ndarray
-        The predicted totals. For p=1, this is equivalent to predicted counts.
-    """
+    """Tweedie(p=1) LightGBM with log(exposure) offset — equivalent to Poisson."""
     data_curr_recoded = data_curr[["var1", "var2"]].copy()
     for col in ["var1", "var2"]:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
@@ -245,47 +181,24 @@ def solution_1b_predict(data_curr: pd.DataFrame) -> np.ndarray:
         "num_iterations": 100,
         "learning_rate": 0.5,
         "verbose": -1,
-        "boost_from_average": False,  # Crucial for offset models
+        "boost_from_average": False,
     }
 
     lgb_model = lgb.train(param, dtrain)
     return np.asarray(lgb_model.predict(data_curr_recoded.values))
 
 
-# %%
-predicted_counts_easy_1b = solution_1b_predict(data_easy)
-data_easy["sol_1b_predict"] = predicted_counts_easy_1b
-data_easy["sol_1b_predict_raw"] = predicted_counts_easy_1b / np.fmax(
-    data_easy["expos"], 1e-9
-)
-predicted_counts_mod_1b = solution_1b_predict(data_mod)
-data_mod["sol_1b_predict"] = predicted_counts_mod_1b
-data_mod["sol_1b_predict_raw"] = predicted_counts_mod_1b / np.fmax(
-    data_mod["expos"], 1e-9
-)
+data_easy["sol_1b_predict_raw"] = solution_1b_predict(data_easy)
+data_easy["sol_1b_predict"] = data_easy["sol_1b_predict_raw"] * data_easy["expos"]
+data_mod["sol_1b_predict_raw"] = solution_1b_predict(data_mod)
+data_mod["sol_1b_predict"] = data_mod["sol_1b_predict_raw"] * data_mod["expos"]
+```
 
+## Solution 2: Rates with exposure weights
 
-# %% [markdown]
-# # SOLUTION 2: Adjusted claim counts with weights
-# %%
-# SOLUTION 2: Adjusted claim counts with weights
+```{python}
 def solution_2_predict(data_curr: pd.DataFrame) -> np.ndarray:
-    """Train a Poisson LightGBM model on rates with exposure as weights.
-
-    The label is the rate (`claim_count / expos`), and the sample weights
-    are set to the exposure. This is the mathematically equivalent "weights"
-    approach to using an offset.
-
-    Parameters
-    ----------
-    data_curr : pd.DataFrame
-        The training data, containing features and pre-calculated 'claim_count_adjusted' and 'expos'.
-
-    Returns
-    -------
-    np.ndarray
-        The predicted rates.
-    """
+    """Poisson LightGBM on rates with exposure as sample weight."""
     data_curr_recoded = data_curr[["var1", "var2"]].copy()
     for col in ["var1", "var2"]:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
@@ -308,72 +221,30 @@ def solution_2_predict(data_curr: pd.DataFrame) -> np.ndarray:
     return np.asarray(lgb_model.predict(data_curr_recoded.values))
 
 
-# %%
-data_easy["sol_2_predict_raw"] = solution_2_predict(
-    data_easy
-)  # This is a predicted RATE
-data_easy["sol_2_predict"] = (
-    data_easy["sol_2_predict_raw"] * data_easy["expos"]
-)  # Convert to COUNT
-data_mod["sol_2_predict_raw"] = solution_2_predict(data_mod)  # This is a predicted RATE
-data_mod["sol_2_predict"] = (
-    data_mod["sol_2_predict_raw"] * data_mod["expos"]
-)  # Convert to COUNT
+data_easy["sol_2_predict_raw"] = solution_2_predict(data_easy)
+data_easy["sol_2_predict"] = data_easy["sol_2_predict_raw"] * data_easy["expos"]
+data_mod["sol_2_predict_raw"] = solution_2_predict(data_mod)
+data_mod["sol_2_predict"] = data_mod["sol_2_predict_raw"] * data_mod["expos"]
+```
 
+## Solution 3: Custom objective function
 
-# %% [markdown]
-# # SOLUTION 3: Custom objective function
-# %%
+```{python}
 def solution_3_predict(data_curr: pd.DataFrame) -> np.ndarray:
-    """Train a Poisson LightGBM model with a custom objective function.
-
-    The exposure is handled by adding log(exposure) to the model's raw prediction
-    inside the objective function to calculate the full linear predictor.
-
-    Parameters
-    ----------
-    data_curr : pd.DataFrame
-        The training data, containing features, 'claim_count', and 'expos'.
-
-    Returns
-    -------
-    np.ndarray
-        The predicted rates (per unit of exposure).
-    """
+    """Poisson LightGBM with custom objective injecting log(exposure) offset."""
     data_curr_recoded = data_curr[["var1", "var2"]].copy()
     for col in ["var1", "var2"]:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
 
-    # We use a closure to pass the exposure array to the objective function,
-    # which is cleaner than using a global variable.
     exposure_values = data_curr["expos"].values
 
     def custom_poisson_obj(
         y_pred: np.ndarray, data: lgb.Dataset
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Custom Poisson objective function with exposure offset.
-
-        Parameters
-        ----------
-        y_pred : np.ndarray
-            Raw score from the booster (F(x)).
-        data : lgb.Dataset
-            The lgb.Dataset object, from which we get the labels.
-
-        Returns
-        -------
-        Tuple[np.ndarray, np.ndarray]
-            Gradient and Hessian of the Poisson loss.
-        """
         y_true = data.get_label()
-        # Add the log-exposure offset to get the full linear predictor (eta)
         eta = y_pred + np.log(np.fmax(exposure_values, 1e-9))
-        # The predicted mean (mu) is the exponent of the linear predictor
         mu = np.exp(eta)
-
-        # Gradient of Poisson loss `mu - y_true*log(mu)` w.r.t. y_pred
         grad = mu - y_true
-        # Hessian of Poisson loss w.r.t. y_pred
         hess = mu
         return grad, hess
 
@@ -395,15 +266,15 @@ def solution_3_predict(data_curr: pd.DataFrame) -> np.ndarray:
     return np.asarray(lgb_model.predict(data_curr_recoded.values))
 
 
-# %%
 data_easy["sol_3_predict_raw"] = solution_3_predict(data_easy)
 data_easy["sol_3_predict"] = np.exp(data_easy["sol_3_predict_raw"]) * data_easy["expos"]
 data_mod["sol_3_predict_raw"] = solution_3_predict(data_mod)
 data_mod["sol_3_predict"] = np.exp(data_mod["sol_3_predict_raw"]) * data_mod["expos"]
+```
 
-# %%
-# ANALYSIS (example checks)
+## Analysis: equivalence checks
 
+```{python}
 emit("\n[bold]Analysis of Predicted Counts (should match lambda)[/bold]")
 for i in [1, 2, 3]:
     solution_check = (
@@ -442,6 +313,8 @@ for sol_pair in [
         }
     )
 print_table("Equivalence Checks", pd.DataFrame(equivalence_rows))
-# %%
+```
+
+```{python}
 data_easy.head()
-# %%
+```

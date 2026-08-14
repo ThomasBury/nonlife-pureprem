@@ -1,4 +1,6 @@
-# Compound Poisson–Gamma, Tweedie Pure Premium, and Exposure Weights
+---
+title: "Theory: Compound Poisson–Gamma, Tweedie Pure Premium, and Exposure Weights"
+---
 
 ## Non-life insurance pure premium in a nutshell
 
@@ -21,7 +23,7 @@ The central principle is simple:
 
 The Tweedie result for pure premium is not introduced as an arbitrary distributional assumption. For $1<p<2$, it can be derived exactly from a compound Poisson model with Gamma severities.
 
-# 1. Why notation matters
+## Why notation matters
 
 A common source of confusion is the symbol $\lambda$.
 
@@ -45,7 +47,7 @@ Both conventions are valid, but using the same symbol for an absolute expected c
 
 This note deliberately uses two different symbols.
 
-## 1.1 Core notation
+### Core notation
 
 For policy or observation $i$:
 
@@ -85,7 +87,7 @@ $$
 
 These distinguish a **rate** from the corresponding **absolute quantity over the observed exposure**.
 
-## 1.2 Sketch of what we want to discuss
+### Sketch of what we want to discuss
 
 Summary of the main derivation, each step will be derived in the next sections. Start with a frequency rate
 
@@ -193,7 +195,7 @@ y_i=\frac{S_i}{e_i},
 }
 $$
 
-# 2. Frequency: rate versus expected count
+## Frequency: rate versus expected count
 
 Assume claim arrivals follow a Poisson process conditional on the policy characteristics $X_i$.
 
@@ -245,7 +247,7 @@ $$
 e_i\nu_i
 $$
 
-## 2.1 Concrete example
+### Concrete example
 
 Suppose a fixed frequency
 
@@ -282,7 +284,7 @@ Nothing happens to the underlying annualized claim-frequency rate $\nu_i$. Expos
 
 This is what phrases such as "unit exposure" mean: one simply evaluates the process at $e_i=1$. It is not a new model.
 
-# 3. Severity model
+## Severity model
 
 Let
 
@@ -358,7 +360,7 @@ $$
 
 This is the same functional parameterization used in the compound-Poisson derivation of Delong, Lindholm and Wüthrich [1, Section 2.1], although Gamma parameter naming conventions vary across texts.
 
-# 4. Aggregate claim cost: the compound Poisson model
+## Aggregate claim cost: the compound Poisson model
 
 Define aggregate claim cost
 
@@ -386,7 +388,7 @@ Therefore $S_i$ has a compound Poisson–Gamma distribution.
 
 This is the classical collective risk model underlying the Tweedie distribution for $1<p<2$; see Jørgensen and de Souza [2] and Delong, Lindholm and Wüthrich [1].
 
-# 5. Mean aggregate claim cost
+## Mean aggregate claim cost
 
 Condition first on the number of claims.
 
@@ -474,7 +476,7 @@ $$
 \text{EUR}
 $$
 
-# 6. Variance of aggregate claim cost
+## Variance of aggregate claim cost
 
 This is the central stochastic calculation.
 
@@ -575,19 +577,16 @@ $$
 
 That linear scaling follows from the Poisson-process assumption.
 
-# 7. The exact Tweedie connection
+## The exact Tweedie connection
 
 For $1<p<2$, the Tweedie distribution is exactly a compound Poisson distribution with Gamma jumps.
 
-This is not merely a similarity of first two moments.
+The equivalence is distributional, not a similarity of first two moments.
 
-The equivalence is distributional.
+- Delong, Lindholm and Wüthrich [1, Sections 2.1-2.2, Proposition 2.1] give a particularly clear derivation by comparing moment-generating functions. They start from a compound Poisson–Gamma model with claim count mean equal to exposure times claim frequency and identify the corresponding Tweedie parameters.
+- Jørgensen and de Souza [2] is a foundational actuarial reference for the same compound-Poisson Tweedie process.
 
-Delong, Lindholm and Wüthrich [1, Sections 2.1-2.2, Proposition 2.1] give a particularly clear derivation by comparing moment-generating functions. They start from a compound Poisson–Gamma model with claim count mean equal to exposure times claim frequency and identify the corresponding Tweedie parameters.
-
-Jørgensen and de Souza [2] is a foundational actuarial reference for the same compound-Poisson Tweedie process.
-
-# 8. Mean-dispersion notation for the Tweedie distribution
+## Mean-dispersion notation for the Tweedie distribution
 
 To keep the derivation transparent, define
 
@@ -625,7 +624,7 @@ $$
 
 This notation deliberately separates the **observation-specific dispersion** $d_i$ from the common base parameter $\phi$.
 
-# 9. Mapping Tweedie parameters to the compound Poisson–Gamma model
+## Mapping Tweedie parameters to the compound Poisson–Gamma model
 
 For
 
@@ -678,7 +677,7 @@ These identities are equivalent to the parameter correspondence in Delong, Lindh
 
 We now verify explicitly that this gives the correct pure premium.
 
-# 10. Recovering frequency times severity
+## Recovering frequency times severity
 
 The mean Gamma severity is
 
@@ -749,7 +748,7 @@ $$
 
 Thus the Tweedie mean is precisely the actuarial pure-premium rate.
 
-# 11. Explicit derivation of the Tweedie variance rate
+## Explicit derivation of the Tweedie variance rate
 
 We now show explicitly why
 
@@ -878,7 +877,7 @@ $$
 
 This is the exact origin of the Tweedie variance function in the compound Poisson–Gamma representation.
 
-# 12. Introducing arbitrary exposure
+## Introducing arbitrary exposure
 
 Return to policy $i$ with exposure $e_i$
 
@@ -958,7 +957,7 @@ $$
 
 The important point is that both mean and variance scale **linearly** with risk exposure.
 
-# 13. From aggregate loss to observed pure premium
+## From aggregate loss to observed pure premium
 
 The observed pure premium (also called loss cost or loss rate) is
 
@@ -1028,11 +1027,11 @@ This already identifies the exposure weight.
 
 But we can say something stronger: $R_i$ is not merely a random variable with Tweedie-like first two moments. Under the compound Poisson–Gamma assumptions, it is itself exactly Tweedie distributed.
 
-# 14. Exact distribution of the pure premium
+## Exact distribution of the pure premium
 
 There are two useful demonstrations.
 
-## 14.1 Demonstration by scaling the compound Poisson representation
+### Demonstration by scaling the compound Poisson representation
 
 We have
 
@@ -1100,7 +1099,7 @@ $$
 
 Because compound Poisson–Gamma distributions are exactly Tweedie for $1<p<2$, $R_i$ is Tweedie.
 
-## 14.2 Demonstration by matching the Tweedie compound-Poisson parameters
+### Demonstration by matching the Tweedie compound-Poisson parameters
 
 Suppose
 
@@ -1215,7 +1214,7 @@ It follows from:
 
 This is the essential result behind Tweedie pure-premium ratemaking.
 
-# 15. The aggregate loss is Tweedie too, but with a different dispersion
+## The aggregate loss is Tweedie too, but with a different dispersion
 
 We have
 
@@ -1309,7 +1308,7 @@ $$
 
 This agrees exactly with the compound Poisson calculation.
 
-# 16. Why the pure-premium Tweedie uses exposure as its weight
+## Why the pure-premium Tweedie uses exposure as its weight
 
 The pure-premium response satisfies
 
@@ -1403,7 +1402,7 @@ when the model is `TweedieRegressor` or a weighted Tweedie objective such as Lig
 
 The current scikit-learn insurance example uses exactly this pure-premium construction and exposure weighting [6].
 
-# 17. The same result from the Tweedie likelihood
+## The same result from the Tweedie likelihood
 
 The variance derivation is sufficient for the quasi-likelihood argument: quasi-likelihood specifies the conditional mean and variance function, rather than a full conditional distribution. Hence, once the exposure scaling of the variance is specified, the corresponding rate weight follows directly from 
 
@@ -1469,7 +1468,7 @@ $$
 w=e_i
 $$
 
-# 18. The same result from Tweedie deviance
+## The same result from Tweedie deviance
 
 For $p\neq1,2$, the Tweedie unit deviance is
 
@@ -1515,7 +1514,7 @@ $$
 $$
 
 
-# 19. Why this is not the same as forcing common dispersion on aggregate loss
+## Why this is not the same as forcing common dispersion on aggregate loss
 
 A common conceptual mistake is to write
 
@@ -1586,7 +1585,7 @@ $$
 }
 $$
 
-# 20. What a single Tweedie model assumes about frequency and severity
+## What a single Tweedie model assumes about frequency and severity
 
 There is an important restriction hidden inside a single Tweedie pure-premium model with fixed $p$ and common base dispersion $\phi$
 
@@ -1631,11 +1630,11 @@ Delong, Lindholm and Wüthrich [1] discuss precisely the relationship between th
 
 Smyth and Jørgensen [5] further discuss dispersion modeling when a homogeneous Tweedie dispersion is too restrictive.
 
-# 21. Modeling interpretation
+## Modeling interpretation
 
 The model should be read in the following order.
 
-## 21.1 Claim arrivals
+### Claim arrivals
 
 $$
 \boxed{
@@ -1647,7 +1646,7 @@ $$
 
 Here $\nu_i$ is a claim-frequency **rate**.
 
-## 21.2 Claim severity
+### Claim severity
 
 $$
 \boxed{
@@ -1665,7 +1664,7 @@ $$
 }
 $$
 
-## 21.3 Aggregate claim cost
+### Aggregate claim cost
 
 $$
 \boxed{
@@ -1687,7 +1686,7 @@ e_i\mu_i.
 }
 $$
 
-## 21.4 Pure-premium rate
+### Pure-premium rate
 
 $$
 \boxed{
@@ -1709,7 +1708,7 @@ $$
 }
 $$
 
-## 21.5 Tweedie representation
+### Tweedie representation
 
 For the compound Poisson–Gamma parameter relation,
 
@@ -1745,9 +1744,9 @@ $$
 }
 $$
 
-# 22. Minimal practical implementations
+## Minimal practical implementations
 
-## 22.1 scikit-learn
+### scikit-learn
 
 ```python
 from sklearn.linear_model import TweedieRegressor
@@ -1783,7 +1782,7 @@ $$
 e_i\widehat{\mu}_i
 $$
 
-## 22.2 LightGBM
+### LightGBM
 
 ```python
 import lightgbm as lgb
@@ -1819,7 +1818,7 @@ e_i\widehat{\mu}_i
 $$
 
 
-# 23. Assumptions behind exposure weighting
+## Assumptions behind exposure weighting
 
 The result
 
@@ -1841,7 +1840,7 @@ follows from a stochastic exposure model. The basic assumptions include:
 
 These assumptions can be questionable when there is strong seasonality, endogenous cancellation, catastrophe dependence, within-policy changes in coverage, or other forms of non-homogeneous exposure.
 
-# 24. Summary of the main derivation
+## Summary of the main derivation
 
 Start with a frequency rate
 
@@ -1966,11 +1965,11 @@ y_i=\frac{S_i}{e_i},
 $$
 
 
-# Appendix A. Poisson counts with exposure offset versus claim-frequency rates with exposure weight
+## Poisson counts with exposure offset versus claim-frequency rates with exposure weight
 
 This appendix proves the exact analogue for claim frequency. The result is simpler than for Tweedie because Poisson corresponds to the boundary power $p=1$.
 
-## A.1 Notation
+### Notation
 
 For policy $i$:
 
@@ -2006,9 +2005,8 @@ $$
 \exp(X_i^\top\beta).
 $$
 
----
 
-## A.2 Formulation 1: claim count with a log-exposure offset
+### Formulation 1: claim count with a log-exposure offset
 
 The count model is
 
@@ -2147,9 +2145,8 @@ $$
 
 This is already the weighted-rate formulation.
 
----
 
-## A.3 Formulation 2: observed frequency with exposure weight
+### Formulation 2: observed frequency with exposure weight
 
 Define the observed claim-frequency rate
 
@@ -2220,9 +2217,8 @@ Important:
 > $F_i=N_i/e_i$ is generally not an integer and therefore should not be interpreted literally as a Poisson count.  
 > The rate formulation is an exponential-dispersion / quasi-likelihood representation whose estimating equations and deviance are equivalent to those of the count-with-offset formulation.
 
----
 
-## A.4 Equality of the score equations
+### Equality of the score equations
 
 For the count formulation,
 
@@ -2327,9 +2323,7 @@ $$
 
 The two unpenalized estimators solve exactly the same score equation.
 
----
-
-## A.5 Exact Poisson deviance identity
+### Exact Poisson deviance identity
 
 The Poisson unit deviance is
 
@@ -2452,9 +2446,7 @@ $$
 
 for the unpenalized Poisson deviance / likelihood mean model.
 
----
-
-## A.6 Why Poisson is especially simple
+### Why Poisson is especially simple
 
 For Tweedie power $p=1$,
 
@@ -2470,11 +2462,10 @@ Thus several exposure-scaling identities that differ for $1<p<2$ collapse to the
 
 This is one reason the offset-versus-rate equivalence for claim frequency is less controversial and easier to see.
 
----
 
-## A.7 Practical formulations
+### Practical formulations
 
-### Count + offset
+#### Count + offset
 
 Conceptually:
 
@@ -2495,7 +2486,7 @@ $$
 X_i^\top\beta.
 $$
 
-### Rate + exposure weight
+#### Rate + exposure weight
 
 Conceptually:
 
@@ -2525,9 +2516,8 @@ For an unpenalized Poisson mean model, the two formulations produce the same est
 
 With regularization, early stopping, software-specific normalization of sample weights, or other algorithmic penalties, one should check the exact implemented objective before claiming identical numerical fits.
 
----
 
-# Appendix B. Compact notation map to Delong, Lindholm and Wüthrich
+## Compact notation map to Delong, Lindholm and Wüthrich
 
 Delong, Lindholm and Wüthrich [1] use
 
@@ -2608,9 +2598,9 @@ R_i
 }
 $$
 
-# References
+## References
 
-## Core actuarial / mathematical references
+### Core actuarial / mathematical references
 
 **[1] Delong, L., Lindholm, M., & Wüthrich, M. V. (2021).**  
 *Making Tweedie's compound Poisson model more accessible.*  
@@ -2627,7 +2617,6 @@ Most directly relevant parts:
 
 This is the clearest single reference for the derivation in this note.
 
----
 
 **[2] Jørgensen, B., & de Souza, M. C. P. (1994).**  
 *Fitting Tweedie's compound Poisson model to insurance claims data.*  
@@ -2636,7 +2625,7 @@ doi: `10.1080/03461238.1994.10413930`.
 
 This is a foundational paper for applying the Tweedie compound Poisson process to insurance ratemaking. It explicitly treats data consisting of total claims, claim counts, exposure, a Poisson claim process and Gamma claim sizes, with exposure entering through the dispersion / weight structure.
 
----
+
 
 **[3] Wüthrich, M. V.**  
 *Non-Life Insurance: Mathematics & Statistics.*  
@@ -2646,7 +2635,7 @@ The version cited in Delong, Lindholm and Wüthrich [1] is dated January 7, 2020
 
 This is a broad actuarial reference for collective risk models, claim-size distributions, premium calculation and GLMs.
 
----
+
 
 **[4] Ohlsson, E., & Johansson, B. (2010).**  
 *Non-Life Insurance Pricing with Generalized Linear Models.*  
@@ -2655,7 +2644,7 @@ doi: `10.1007/978-3-642-10791-7`.
 
 This is a practical actuarial GLM reference for claim frequency, pure premium, exposure, tariff modeling and weighted GLMs.
 
----
+
 
 **[5] Smyth, G. K., & Jørgensen, B. (2002).**  
 *Fitting Tweedie's compound Poisson model to insurance claims data: dispersion modelling.*  
@@ -2664,14 +2653,14 @@ doi: `10.2143/AST.32.1.1020`.
 
 This paper is useful for understanding why modeling Tweedie dispersion may be necessary rather than assuming one homogeneous dispersion parameter across heterogeneous insurance risks.
 
-## Software reference
+### Software reference
 
 **[6] scikit-learn developers.**  
 *Tweedie regression on insurance claims*, official scikit-learn example.
 
 The example defines pure premium as total claim amount per unit exposure and fits the pure-premium Tweedie regression using exposure as `sample_weight`. It also contrasts the direct Tweedie approach with separate Poisson frequency and Gamma severity models.
 
-# Final takeaway
+## Final takeaway
 
 For standard non-life ratemaking under the compound Poisson–Gamma construction,
 

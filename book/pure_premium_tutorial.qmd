@@ -1,0 +1,398 @@
+---
+title: "Pure-Premium Tutorial"
+---
+
+Run the cells in order. This is the deliberately pedestrian companion to
+the library module: it uses the same tested functions, but shows every pricing
+decision instead of hiding it in `main()`. The full freMTPL2 run can take a
+while; use a small sample only to check that the notebook works, not to draw
+actuarial conclusions.
+
+```{python}
+from itertools import combinations
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import numpy as np
+import pandas as pd
+from IPython.display import Image, display
+
+from tweedie_regr import (
+    TARGET_SPECS,
+    coefficient_relativity_table,
+    evaluate_predictions,
+    exposure_balanced_double_lift_table,
+    fit_glum_inference,
+    fit_glum_predictive,
+    fit_lightgbm,
+    lift_diagnostics,
+    lightgbm_frame,
+    load_mtpl2,
+    lorenz_dominance_table,
+    make_splits,
+    portfolio_calibration_table,
+    print_frame,
+    save_core_figures,
+    select_tweedie_power,
+    target_and_weight,
+    target_weight_table,
+)
+```
+
+## Set a reproducible run
+
+**Why:** a comparison is only credible when every model sees the same data
+split and tuning budget.
+
+**What we do:** keep the production defaults below. Set `n_samples` only for
+a quick software smoke run.
+
+**Best practice:** fix the random seed and comparison protocol before looking
+at results. Do not use a convenience sample to select a rate model.
+
+```{python}
+n_samples = None  # e.g. 10_000 for a quick software smoke run
+n_alphas = 30
+max_rounds = 2_000
+early_stopping_rounds = 50
+charts = TemporaryDirectory(prefix="pure-premium-")
+output_dir = Path(charts.name)
+```
+
+## Build audited frequency, severity, and pure-premium targets
+
+**Why:** a model cannot repair an incoherent target. Frequency, severity, and
+pure premium each represent a rate over a different amount of risk.
+
+**What we do:** load policy and claim tables, remove non-positive claims, cap
+each claim, aggregate claims to policy level, and construct the three targets.
+
+**Best practice:** reconcile source claim counts with claim records, choose
+and document the cap before fitting, and use exposure for frequency and pure
+premium but claim count for claim-weighted severity.
+
+```{python}
+data, audit = load_mtpl2(n_samples=n_samples)
+print_frame("Target and weight definitions", target_weight_table())
+print_frame("Claim preparation", pd.DataFrame([audit]))
+```
+
+## Reserve a test set before making modelling choices
+
+**Why:** test performance is evidence only when test policies did not
+influence feature choices, Tweedie power, or LightGBM tuning.
+
+**What we do:** make a fixed train/test split, then split training data into
+development-train and development-validation data.
+
+**Best practice:** tune on development validation, refit once on all training
+data, and inspect the untouched test set last. Also repeat by time or
+geography to test stability.
+
+```{python}
+splits = make_splits(data)
+print_frame(
+    "Split sizes",
+    pd.DataFrame(
+        {
+            "rows": {
+                "development train": len(splits.development_train),
+                "development validation": len(splits.development_validation),
+                "final train": len(splits.train),
+                "untouched test": len(splits.test),
+            },
+            "exposure": {
+                "development train": splits.development_train["Exposure"].sum(),
+                "development validation": splits.development_validation[
+                    "Exposure"
+                ].sum(),
+                "final train": splits.train["Exposure"].sum(),
+                "untouched test": splits.test["Exposure"].sum(),
+            },
+        }
+    ),
+)
+```
+
+## Select the Tweedie variance power on development data
+
+**Why:** direct pure-premium models need a variance power between Poisson and
+Gamma. Selecting it on the test set would make the final comparison optimistic.
+
+**What we do:** fit a small GLUM profile over candidate powers and retain the
+power with the best development-validation likelihood.
+
+**Best practice:** select every hyperparameter, including distributional
+choices, without opening the test set; retain the profile for review.
+
+```{python}
+selected_power, power_profile = select_tweedie_power(
+    splits.development_train,
+    splits.development_validation,
+)
+print_frame("Tweedie power profile", power_profile)
+print(f"Selected Tweedie power: {selected_power:.1f}")
+```
+
+## Fit an interpretable GLUM benchmark
+
+**Why:** an interpretable, stable benchmark tells us whether a flexible model
+earns its extra complexity.
+
+**What we do:** fit a regularized GLUM for prediction, then a separate
+unregularized robust GLUM for classical coefficient relativities.
+
+**Best practice:** confidence intervals from the unregularized model are not
+inference for the penalized predictive fit. Review relativities for
+plausibility, but choose predictions with out-of-sample evidence.
+
+```{python}
+glum_models = {}
+for component in TARGET_SPECS:
+    glum_models[component] = fit_glum_predictive(
+        splits.train,
+        component,
+        selected_power,
+        n_alphas=n_alphas,
+    )
+    inference = fit_glum_inference(splits.train, component, selected_power)
+    relativities = coefficient_relativity_table(inference)
+    print_frame(f"GLUM {component} relativities", relativities)
+    print(
+        f"GLUM {component}: alpha={glum_models[component].alpha_:.6g}, "
+        f"l1_ratio={glum_models[component].l1_ratio_:.1f}"
+    )
+```
+
+## Fit a nonlinear LightGBM challenger
+
+**Why:** interactions and nonlinear effects can improve pricing predictions,
+but can also overfit noise.
+
+**What we do:** tune a small LightGBM grid with early stopping on development
+validation, then refit each selected model on the final training data.
+
+**Best practice:** give every challenger the same train/test protocol, keep
+its search space modest and documented, and require a material test-set gain
+plus stable business behaviour before accepting extra complexity.
+
+```{python}
+lightgbm_models = {}
+for component in TARGET_SPECS:
+    model, tuning = fit_lightgbm(
+        splits.development_train,
+        splits.development_validation,
+        splits.train,
+        component,
+        selected_power,
+        max_rounds=max_rounds,
+        early_stopping_rounds=early_stopping_rounds,
+    )
+    lightgbm_models[component] = model
+    print_frame(f"LightGBM {component} tuning", tuning)
+```
+
+## Produce four pure-premium estimates on the untouched test set
+
+**Why:** the comparison needs like-for-like predictions for the same policies.
+Frequency-severity and direct-Tweedie approaches answer the same pricing
+question through different modelling decompositions.
+
+**What we do:** predict frequency and severity, multiply paired estimates,
+and predict pure premium directly with each model family.
+
+**Best practice:** multiply frequency and severity from the same model family
+unless a designed hybrid has been validated. Keep predictions positive and
+evaluate all four alternatives against the identical test set.
+
+```{python}
+test_features = lightgbm_frame(splits.test)
+glum_frequency = np.asarray(
+    glum_models["frequency"].predict(splits.test), dtype=float
+)
+glum_severity = np.asarray(
+    glum_models["severity"].predict(splits.test), dtype=float
+)
+lgb_frequency = np.asarray(
+    lightgbm_models["frequency"].predict(test_features), dtype=float
+)
+lgb_severity = np.asarray(
+    lightgbm_models["severity"].predict(test_features), dtype=float
+)
+frequency_predictions = {"GLUM": glum_frequency, "LightGBM": lgb_frequency}
+
+severity_rows, _, _ = target_and_weight(splits.test, "severity")
+severity_predictions = {
+    "GLUM": np.asarray(glum_models["severity"].predict(severity_rows), dtype=float),
+    "LightGBM": np.asarray(
+        lightgbm_models["severity"].predict(lightgbm_frame(severity_rows)),
+        dtype=float,
+    ),
+}
+pure_premium_predictions = {
+    "GLUM frequency x severity": glum_frequency * glum_severity,
+    "LightGBM frequency x severity": lgb_frequency * lgb_severity,
+    "GLUM Tweedie": np.asarray(
+        glum_models["pure_premium"].predict(splits.test), dtype=float
+    ),
+    "LightGBM Tweedie": np.asarray(
+        lightgbm_models["pure_premium"].predict(test_features), dtype=float
+    ),
+}
+```
+
+## Compare predictive accuracy with the proper score
+
+**Why:** prediction accuracy asks whether predicted rates are close to observed
+outcomes, with large risk volumes carrying appropriate influence.
+
+**What we do:** report exposure- or claim-count-weighted deviance and D2 on
+the untouched test set, matching Poisson, Gamma, or Tweedie to the response.
+
+**Best practice:** compare deviance and D2 only between models of the same
+response and family; lower deviance and higher D2 are better. Never compare a
+frequency deviance directly with a severity or pure-premium deviance.
+
+```{python}
+for component, predictions in (
+    ("frequency", frequency_predictions),
+    ("severity", severity_predictions),
+    ("pure_premium", pure_premium_predictions),
+):
+    print_frame(
+        f"{component.replace('_', ' ').title()} test accuracy",
+        evaluate_predictions(splits.test, component, predictions, selected_power),
+    )
+```
+
+## Check portfolio-level calibration
+
+**Why:** a useful ranking can still charge too much or too little in total.
+Portfolio calibration asks whether total expected claims match total observed
+claims.
+
+**What we do:** calculate test actual/expected (A/E), observed total, and
+predicted total for frequency, severity, and pure premium.
+
+**Best practice:** A/E near 1 is necessary but not sufficient. Quantify its
+uncertainty and repeat by meaningful segments and time periods; a perfect
+portfolio A/E can hide offsetting errors between customer groups.
+
+```{python}
+for component, predictions in (
+    ("frequency", frequency_predictions),
+    ("severity", severity_predictions),
+    ("pure_premium", pure_premium_predictions),
+):
+    print_frame(
+        f"{component.replace('_', ' ').title()} portfolio calibration",
+        portfolio_calibration_table(splits.test, component, predictions),
+    )
+```
+
+## Test ranking ability with Lorenz curves and Gini
+
+**Why:** pricing needs to order safer and riskier policies, not merely hit the
+portfolio mean. A monotonic rescaling can preserve ranking while changing A/E.
+
+**What we do:** order test policies from low to high predicted pure premium,
+then plot cumulative exposure against cumulative capped loss. The table states
+whether one Lorenz curve is lower everywhere; Gini summarizes separation.
+
+**Best practice:** higher positive Gini is better, but inspect the full curve.
+A lower curve dominates only when it does not cross; crossing curves are not a
+ranking victory. Ranking evidence never replaces calibration evidence.
+
+```{python}
+y_test = splits.test["PurePremium"].to_numpy(dtype=float)
+exposure = splits.test["Exposure"].to_numpy(dtype=float)
+print_frame(
+    "Pure-premium Lorenz dominance",
+    lorenz_dominance_table(y_test, pure_premium_predictions, exposure),
+)
+print_frame(
+    "Pure-premium accuracy and Gini",
+    evaluate_predictions(
+        splits.test,
+        "pure_premium",
+        pure_premium_predictions,
+        selected_power,
+    ),
+)
+```
+
+## Inspect single-model lift by predicted-risk decile
+
+**Why:** lift makes ranking concrete: it asks whether observed pure premium
+rises with the risk bands that a model predicts.
+
+**What we do:** divide test exposure, from safest to riskiest prediction, into
+ten equal-exposure bins and compare observed and predicted pure premium.
+
+**Best practice:** use equal exposure rather than equal policy counts when
+policies have different durations. Inspect credibility, uncertainty, and
+irregular deciles instead of choosing a model from one impressive endpoint.
+
+```{python}
+print_frame(
+    "Pure-premium lift ranges",
+    lift_diagnostics(y_test, pure_premium_predictions, exposure),
+)
+```
+
+## Use double lift to examine where models disagree
+
+**Why:** two models can have similar aggregate accuracy but disagree sharply
+for individual policies. Double lift focuses attention on disagreements.
+
+**What we do:** order policies by each model-A/model-B pure-premium ratio and
+compare observed rates across equal-exposure ratio deciles.
+
+**Best practice:** rising observed rates across A/B ratio deciles favour A's
+relative prices; falling rates favour B. Flat, noisy, or crossing evidence is
+inconclusive. Double lift is a diagnostic, not an automatic model selector.
+
+```{python}
+for (model_a, prediction_a), (model_b, prediction_b) in combinations(
+    pure_premium_predictions.items(),
+    2,
+):
+    print_frame(
+        f"Double lift: {model_a} / {model_b}",
+        exposure_balanced_double_lift_table(
+            y_test,
+            prediction_a,
+            prediction_b,
+            exposure,
+        ),
+    )
+```
+
+## Render the evidence together
+
+**Why:** tables give exact values; charts reveal shape, crossings, and local
+failures that summary statistics can hide.
+
+**What we do:** save the calibration, Lorenz, lift, and double-lift figures
+produced by the shared tutorial code, then display them inline.
+
+**Best practice:** select a model only when its accuracy, calibration,
+ranking, lift, stability, and business constraints agree. Record the locked
+test result before recalibrating or deploying the selected model.
+
+```{python}
+save_core_figures(
+    splits.test,
+    frequency_predictions,
+    severity_predictions,
+    pure_premium_predictions,
+    output_dir,
+)
+for chart in (
+    "component_calibration.png",
+    "pure_premium_lorenz.png",
+    "pure_premium_lift.png",
+    "pure_premium_double_lift.png",
+):
+    display(Image(filename=output_dir / chart))
+```
