@@ -1,16 +1,24 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import lightgbm as lgb
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from glum import GeneralizedLinearRegressor, TweedieDistribution
+from glum import (
+    GeneralizedLinearRegressor,
+    GeneralizedLinearRegressorCV,
+    TweedieDistribution,
+)
 
 from tweedie_regr.pure_premium import (
     cli,
+    evaluate_predictions,
     exposure_balanced_double_lift_table,
     exposure_balanced_lift_table,
+    fit_glum_predictive,
     lift_diagnostics,
     lightgbm_params,
     lorenz_curve,
@@ -18,8 +26,44 @@ from tweedie_regr.pure_premium import (
     make_splits,
     portfolio_calibration_table,
     prepare_mtpl_data,
+    save_core_figures,
+    select_tweedie_power,
     target_and_weight,
 )
+
+
+def synthetic_pricing_frame(n_rows: int = 80) -> pd.DataFrame:
+    rng = np.random.default_rng(42)
+    index = np.arange(n_rows)
+    exposure = 0.5 + (index % 5) / 10
+    claim_nb = np.where(index % 4 == 0, 0, 1 + (index % 3 == 0))
+    claim_nb[-1] = 0
+    claim_amount = claim_nb * (1_000 + 5 * index)
+    severity = np.full(n_rows, np.nan)
+    np.divide(claim_amount, claim_nb, out=severity, where=claim_nb > 0)
+    frame = pd.DataFrame(
+        {
+            "ClaimNb": claim_nb,
+            "Exposure": exposure,
+            "Frequency": claim_nb / exposure,
+            "Severity": severity,
+            "PurePremium": claim_amount / exposure,
+            "ClaimAmountCapped": claim_amount,
+            "VehAge": rng.uniform(1, 20, n_rows),
+            "DrivAge": rng.uniform(20, 80, n_rows),
+            "BonusMalus": rng.uniform(50, 100, n_rows),
+            "LogDensity": rng.normal(4, 0.5, n_rows),
+            "VehBrand": rng.choice(("B1", "B2", "B3"), n_rows),
+            "VehPower": rng.choice(("P1", "P2", "P3"), n_rows),
+            "VehGas": rng.choice(("Diesel", "Regular"), n_rows),
+            "Region": rng.choice(("R1", "R2", "R3"), n_rows),
+            "Area": rng.choice(("A", "B"), n_rows),
+        }
+    )
+    frame.loc[n_rows - 1, "VehBrand"] = "rare-no-claim"
+    for column in ("VehBrand", "VehPower", "VehGas", "Region", "Area"):
+        frame[column] = frame[column].astype("category")
+    return frame
 
 
 class PurePremiumTutorialTest(unittest.TestCase):
@@ -186,6 +230,166 @@ class PurePremiumTutorialTest(unittest.TestCase):
         self.assertAlmostEqual(
             float(double_lift["exposure"].sum()), float(weight.sum())
         )
+
+    def test_double_lift_rejects_invalid_inputs(self) -> None:
+        observed = np.array([1.0, 2.0])
+        prediction = np.array([1.0, 2.0])
+        exposure = np.ones(2)
+
+        with self.assertRaisesRegex(ValueError, "n_bins"):
+            exposure_balanced_double_lift_table(
+                observed, prediction, prediction, exposure, n_bins=0
+            )
+        for invalid_exposure in (
+            np.array([1.0, 0.0]),
+            np.array([1.0, -1.0]),
+            np.array([1.0, np.nan]),
+            np.array([1.0, np.inf]),
+        ):
+            with (
+                self.subTest(exposure=invalid_exposure),
+                self.assertRaisesRegex(ValueError, "exposure"),
+            ):
+                exposure_balanced_double_lift_table(
+                    observed, prediction, prediction, invalid_exposure
+                )
+        for invalid_prediction in (
+            np.array([1.0, 0.0]),
+            np.array([1.0, -1.0]),
+            np.array([1.0, np.nan]),
+            np.array([1.0, np.inf]),
+        ):
+            for side in ("a", "b"):
+                with (
+                    self.subTest(prediction=invalid_prediction, side=side),
+                    self.assertRaisesRegex(ValueError, f"model_{side}_prediction"),
+                ):
+                    exposure_balanced_double_lift_table(
+                        observed,
+                        invalid_prediction if side == "a" else prediction,
+                        invalid_prediction if side == "b" else prediction,
+                        exposure,
+                    )
+
+    def test_evaluate_predictions_contract(self) -> None:
+        prediction = np.ones(len(self.data))
+        result = evaluate_predictions(
+            self.data,
+            "frequency",
+            {"constant": prediction},
+            tweedie_power=1.5,
+        )
+        self.assertEqual(list(result.index), ["constant"])
+        self.assertTrue(np.isfinite(result.to_numpy()).all())
+
+        with self.assertRaisesRegex(ValueError, "length"):
+            evaluate_predictions(
+                self.data,
+                "frequency",
+                {"short": prediction[:-1]},
+                tweedie_power=1.5,
+            )
+        for invalid in (0.0, np.nan, np.inf):
+            bad = prediction.copy()
+            bad[0] = invalid
+            with (
+                self.subTest(prediction=invalid),
+                self.assertRaisesRegex(ValueError, "non-finite or non-positive"),
+            ):
+                evaluate_predictions(
+                    self.data,
+                    "frequency",
+                    {"bad": bad},
+                    tweedie_power=1.5,
+                )
+
+    def test_severity_fit_adds_zero_weight_anchor_for_no_claim_category(self) -> None:
+        data = synthetic_pricing_frame()
+        captured_weight = None
+        original_fit = GeneralizedLinearRegressorCV.fit
+
+        def capture_fit(model, rows, target, sample_weight=None, **kwargs):
+            nonlocal captured_weight
+            captured_weight = np.asarray(sample_weight, dtype=float).copy()
+            return original_fit(
+                model,
+                rows,
+                target,
+                sample_weight=sample_weight,
+                **kwargs,
+            )
+
+        with patch.object(GeneralizedLinearRegressorCV, "fit", new=capture_fit):
+            model = fit_glum_predictive(data, "severity", 1.5, n_alphas=2)
+
+        self.assertIsNotNone(captured_weight)
+        self.assertEqual(np.count_nonzero(captured_weight == 0), 1)
+        prediction = model.predict(data)
+        self.assertTrue(np.all(np.isfinite(prediction) & (prediction > 0)))
+
+    def test_select_tweedie_power_profiles_supplied_candidates(self) -> None:
+        data = synthetic_pricing_frame()
+        data.loc[data.index[-1], "VehBrand"] = "B1"
+        data["VehBrand"] = data["VehBrand"].cat.remove_unused_categories()
+        powers = (1.3, 1.7)
+        with patch(
+            "tweedie_regr.pure_premium.RATING_FORMULA",
+            "VehAge + DrivAge + LogDensity",
+        ):
+            selected, profile = select_tweedie_power(
+                data.iloc[:50],
+                data.iloc[50:],
+                powers=powers,
+            )
+        self.assertEqual(list(profile["power"]), list(powers))
+        self.assertEqual(len(profile), 2)
+        self.assertTrue(np.isfinite(profile.to_numpy()).all())
+        self.assertIn(selected, powers)
+
+    def test_save_core_figures_contract_and_style_scope(self) -> None:
+        data = synthetic_pricing_frame(24)
+        pure_premium_predictions = {
+            "GLUM frequency x severity": np.full(len(data), 1_000.0),
+            "LightGBM frequency x severity": np.full(len(data), 1_100.0),
+            "GLUM Tweedie": np.full(len(data), 1_200.0),
+            "LightGBM Tweedie": np.full(len(data), 1_300.0),
+        }
+        missing = pure_premium_predictions.copy()
+        missing.pop("GLUM Tweedie")
+        extra = {**pure_premium_predictions, "extra": np.ones(len(data))}
+        with TemporaryDirectory() as temp_dir:
+            for invalid in (missing, extra):
+                with (
+                    self.subTest(keys=set(invalid)),
+                    self.assertRaisesRegex(ValueError, "contain exactly"),
+                ):
+                    save_core_figures(data, {}, {}, invalid, Path(temp_dir))
+
+            frequency_predictions = {
+                "GLUM": np.ones(len(data)),
+                "LightGBM": np.full(len(data), 1.1),
+            }
+            severity_rows, _, _ = target_and_weight(data, "severity")
+            severity_predictions = {
+                "GLUM": np.full(len(severity_rows), 1_000.0),
+                "LightGBM": np.full(len(severity_rows), 1_100.0),
+            }
+            style_before = {
+                key: plt.rcParams[key]
+                for key in ("axes.facecolor", "axes.prop_cycle", "grid.color")
+            }
+            save_core_figures(
+                data,
+                frequency_predictions,
+                severity_predictions,
+                pure_premium_predictions,
+                Path(temp_dir),
+            )
+            self.assertEqual(
+                style_before,
+                {key: plt.rcParams[key] for key in style_before},
+            )
+            self.assertEqual(len(list(Path(temp_dir).glob("*.png"))), 4)
 
     def test_tiny_glum_and_lightgbm_family_fits(self) -> None:
         rng = np.random.default_rng(42)

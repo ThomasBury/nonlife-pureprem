@@ -2,7 +2,7 @@
 title: "Introduction"
 ---
 
-# Offset–Weight Equivalence in Non-Life Pricing
+# French MTPL Frequency, Severity, and Pure-Premium Pricing
 
 This book is an actuarial pricing tutorial built around the French freMTPL2
 data. It follows the pricing workflow in order:

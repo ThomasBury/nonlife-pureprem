@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import lightgbm as lgb
-import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from glum import (
@@ -46,9 +46,6 @@ from sklearn.metrics import (
     mean_tweedie_deviance,
 )
 from sklearn.model_selection import train_test_split
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 RANDOM_STATE = 42
 CLAIM_CAP = 100_000.0
@@ -673,6 +670,14 @@ def exposure_balanced_double_lift_table(
     model_a_prediction = np.asarray(model_a_prediction, dtype=float)
     model_b_prediction = np.asarray(model_b_prediction, dtype=float)
     exposure = np.asarray(exposure, dtype=float)
+    if n_bins < 1:
+        raise ValueError("n_bins must be at least 1")
+    if not np.all(np.isfinite(exposure) & (exposure > 0)):
+        raise ValueError("exposure must be finite and positive")
+    if not np.all(np.isfinite(model_a_prediction) & (model_a_prediction > 0)):
+        raise ValueError("model_a_prediction must be finite and positive")
+    if not np.all(np.isfinite(model_b_prediction) & (model_b_prediction > 0)):
+        raise ValueError("model_b_prediction must be finite and positive")
     ratio = model_a_prediction / model_b_prediction
     order = np.argsort(ratio, kind="stable")
     cumulative_exposure = np.r_[0.0, np.cumsum(exposure[order])]
@@ -792,102 +797,125 @@ def save_core_figures(
     output_dir: Path,
 ) -> None:
     """Save the three core tutorial figures."""
+    expected = {
+        "GLUM frequency x severity",
+        "LightGBM frequency x severity",
+        "GLUM Tweedie",
+        "LightGBM Tweedie",
+    }
+    if set(pure_premium_predictions) != expected:
+        raise ValueError(
+            f"pure_premium_predictions must contain exactly {sorted(expected)}"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    plt.style.use("fivethirtyeight")
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
-    for axis, component, predictions in (
-        (axes[0], "frequency", frequency_predictions),
-        (axes[1], "severity", severity_predictions),
-    ):
-        calibration = grouped_calibration(test, component, predictions)
-        x = np.arange(len(calibration))
-        axis.plot(x, calibration["observed"], "o-", label="Observed")
-        for name in predictions:
-            axis.plot(x, calibration[name], "--", label=name)
+    with plt.style.context("fivethirtyeight"):
+        fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+        for axis, component, predictions in (
+            (axes[0], "frequency", frequency_predictions),
+            (axes[1], "severity", severity_predictions),
+        ):
+            calibration = grouped_calibration(test, component, predictions)
+            x = np.arange(len(calibration))
+            axis.plot(x, calibration["observed"], "o-", label="Observed")
+            for name in predictions:
+                axis.plot(x, calibration[name], "--", label=name)
+            axis.set(
+                title=f"{component.replace('_', ' ').title()} by driver age",
+                xlabel="Driver-age band",
+                ylabel="Rate",
+            )
+            axis.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / "component_calibration.png", dpi=150)
+        plt.close(fig)
+
+        y_test = test["PurePremium"].to_numpy(dtype=float)
+        exposure = test["Exposure"].to_numpy(dtype=float)
+        fig, axis = plt.subplots(figsize=(7, 6))
+        axis.plot([0, 1], [0, 1], color="black", linestyle=":", label="Equality")
+        for name, prediction in pure_premium_predictions.items():
+            x, y = lorenz_curve(y_test, prediction, exposure)
+            axis.plot(
+                x,
+                y,
+                label=f"{name} (Gini {gini(y_test, prediction, exposure):.3f})",
+            )
         axis.set(
-            title=f"{component.replace('_', ' ').title()} by driver age",
-            xlabel="Driver-age band",
-            ylabel="Rate",
+            title="Pure-premium Lorenz curves (test)",
+            xlabel="Cumulative exposure",
+            ylabel="Cumulative capped loss",
         )
         axis.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "component_calibration.png", dpi=150)
-    plt.close(fig)
+        fig.tight_layout()
+        fig.savefig(output_dir / "pure_premium_lorenz.png", dpi=150)
+        plt.close(fig)
 
-    y_test = test["PurePremium"].to_numpy(dtype=float)
-    exposure = test["Exposure"].to_numpy(dtype=float)
-    fig, axis = plt.subplots(figsize=(7, 6))
-    axis.plot([0, 1], [0, 1], color="black", linestyle=":", label="Equality")
-    for name, prediction in pure_premium_predictions.items():
-        x, y = lorenz_curve(y_test, prediction, exposure)
-        axis.plot(x, y, label=f"{name} (Gini {gini(y_test, prediction, exposure):.3f})")
-    axis.set(
-        title="Pure-premium Lorenz curves (test)",
-        xlabel="Cumulative exposure",
-        ylabel="Cumulative capped loss",
-    )
-    axis.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "pure_premium_lorenz.png", dpi=150)
-    plt.close(fig)
+        fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
+        for axis, (name, prediction) in zip(
+            axes.flat, pure_premium_predictions.items(), strict=True
+        ):
+            lift = exposure_balanced_lift_table(y_test, prediction, exposure)
+            axis.plot(lift.index, lift["observed_rate"], "o-", label="Observed")
+            axis.plot(lift.index, lift["predicted_rate"], "s--", label="Predicted")
+            axis.set(
+                title=name,
+                xlabel="Exposure-balanced decile",
+                ylabel="Pure premium",
+            )
+            axis.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / "pure_premium_lift.png", dpi=150)
+        plt.close(fig)
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
-    for axis, (name, prediction) in zip(
-        axes.flat, pure_premium_predictions.items(), strict=True
-    ):
-        lift = exposure_balanced_lift_table(y_test, prediction, exposure)
-        axis.plot(lift.index, lift["observed_rate"], "o-", label="Observed")
-        axis.plot(lift.index, lift["predicted_rate"], "s--", label="Predicted")
-        axis.set(title=name, xlabel="Exposure-balanced decile", ylabel="Pure premium")
-        axis.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "pure_premium_lift.png", dpi=150)
-    plt.close(fig)
-
-    comparisons = (
-        (
-            "GLUM decomposition",
-            "GLUM frequency x severity",
-            "LightGBM decomposition",
-            "LightGBM frequency x severity",
-        ),
-        ("GLUM Tweedie", "GLUM Tweedie", "LightGBM Tweedie", "LightGBM Tweedie"),
-        (
-            "GLUM decomposition",
-            "GLUM frequency x severity",
-            "GLUM Tweedie",
-            "GLUM Tweedie",
-        ),
-        (
-            "LightGBM decomposition",
-            "LightGBM frequency x severity",
-            "LightGBM Tweedie",
-            "LightGBM Tweedie",
-        ),
-    )
-    fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
-    for axis, (a_label, a_name, b_label, b_name) in zip(
-        axes.flat, comparisons, strict=True
-    ):
-        lift = exposure_balanced_double_lift_table(
-            y_test,
-            pure_premium_predictions[a_name],
-            pure_premium_predictions[b_name],
-            exposure,
+        comparisons = (
+            (
+                "GLUM decomposition",
+                "GLUM frequency x severity",
+                "LightGBM decomposition",
+                "LightGBM frequency x severity",
+            ),
+            (
+                "GLUM Tweedie",
+                "GLUM Tweedie",
+                "LightGBM Tweedie",
+                "LightGBM Tweedie",
+            ),
+            (
+                "GLUM decomposition",
+                "GLUM frequency x severity",
+                "GLUM Tweedie",
+                "GLUM Tweedie",
+            ),
+            (
+                "LightGBM decomposition",
+                "LightGBM frequency x severity",
+                "LightGBM Tweedie",
+                "LightGBM Tweedie",
+            ),
         )
-        axis.plot(lift.index, lift["observed_rate"], "o-", label="Observed")
-        axis.plot(lift.index, lift["model_a_rate"], "s--", label=a_label)
-        axis.plot(lift.index, lift["model_b_rate"], "^:", label=b_label)
-        axis.set(
-            title=f"{a_label} / {b_label}",
-            xlabel="A/B ratio decile",
-            ylabel="Pure premium",
-        )
-        axis.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "pure_premium_double_lift.png", dpi=150)
-    plt.close(fig)
+        fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
+        for axis, (a_label, a_name, b_label, b_name) in zip(
+            axes.flat, comparisons, strict=True
+        ):
+            lift = exposure_balanced_double_lift_table(
+                y_test,
+                pure_premium_predictions[a_name],
+                pure_premium_predictions[b_name],
+                exposure,
+            )
+            axis.plot(lift.index, lift["observed_rate"], "o-", label="Observed")
+            axis.plot(lift.index, lift["model_a_rate"], "s--", label=a_label)
+            axis.plot(lift.index, lift["model_b_rate"], "^:", label=b_label)
+            axis.set(
+                title=f"{a_label} / {b_label}",
+                xlabel="A/B ratio decile",
+                ylabel="Pure premium",
+            )
+            axis.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / "pure_premium_double_lift.png", dpi=150)
+        plt.close(fig)
 
 
 def print_frame(title: str, frame: pd.DataFrame) -> None:

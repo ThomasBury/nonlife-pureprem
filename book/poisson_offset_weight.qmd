@@ -81,6 +81,7 @@ data_mod = pd.DataFrame(
         "expos": np.round(np.random.uniform(size=10000), 4),
     }
 )
+data_mod = data_mod.loc[data_mod["expos"] > 0].copy()
 
 var_impact = pd.DataFrame(
     {
@@ -187,16 +188,10 @@ def solution_1b_predict(data_curr: pd.DataFrame) -> np.ndarray:
     return np.asarray(lgb_model.predict(data_curr_recoded.values))
 
 
-predicted_counts_easy_1b = solution_1b_predict(data_easy)
-data_easy["sol_1b_predict"] = predicted_counts_easy_1b
-data_easy["sol_1b_predict_raw"] = predicted_counts_easy_1b / np.fmax(
-    data_easy["expos"], 1e-9
-)
-predicted_counts_mod_1b = solution_1b_predict(data_mod)
-data_mod["sol_1b_predict"] = predicted_counts_mod_1b
-data_mod["sol_1b_predict_raw"] = predicted_counts_mod_1b / np.fmax(
-    data_mod["expos"], 1e-9
-)
+data_easy["sol_1b_predict_raw"] = solution_1b_predict(data_easy)
+data_easy["sol_1b_predict"] = data_easy["sol_1b_predict_raw"] * data_easy["expos"]
+data_mod["sol_1b_predict_raw"] = solution_1b_predict(data_mod)
+data_mod["sol_1b_predict"] = data_mod["sol_1b_predict_raw"] * data_mod["expos"]
 ```
 
 ## Solution 2: Rates with exposure weights

@@ -113,8 +113,8 @@ evidence without automatic model-superiority or universal calibration verdicts.
 ## Companion Material
 
 The main pricing tutorial uses exposure as the rate-model weight under the
-actuarial risk-volume convention. The theory chapter
-([book/theory.qmd](book/theory.qmd))
+actuarial risk-volume convention. The Tweedie offset-weight chapter
+([book/tweedie_offset_weight.qmd](book/tweedie_offset_weight.qmd))
 derives the generic total-offset/rate-weight equivalence under a different
 dispersion convention, where the exact Tweedie rate weight is
 exposure^(2-p).
