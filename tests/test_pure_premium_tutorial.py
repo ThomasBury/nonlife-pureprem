@@ -389,7 +389,15 @@ class PurePremiumTutorialTest(unittest.TestCase):
                 style_before,
                 {key: plt.rcParams[key] for key in style_before},
             )
-            self.assertEqual(len(list(Path(temp_dir).glob("*.png"))), 4)
+            self.assertSetEqual(
+                {path.name for path in Path(temp_dir).glob("*.png")},
+                {
+                    "component_calibration.png",
+                    "pure_premium_lorenz.png",
+                    "pure_premium_lift.png",
+                    "pure_premium_double_lift.png",
+                },
+            )
 
     def test_tiny_glum_and_lightgbm_family_fits(self) -> None:
         rng = np.random.default_rng(42)
