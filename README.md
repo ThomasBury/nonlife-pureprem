@@ -79,7 +79,9 @@ quarto render book
 `freeze: auto` remains enabled, so project renders rerun changed chapters.
 Before merging a change that alters an executable chapter or its results, run
 the full local render and commit the refreshed `book/_freeze/` results with it.
-GitHub Pages renders with `--no-execute` and publishes those committed results.
+GitHub Pages renders the book with `freeze: auto` and restores the committed
+`_freeze/` outputs; the CI step does not need Python, and a stale freeze will
+fail the build loudly.
 
 Chapters cover the full pricing comparison, Poisson and Tweedie offset-weight
 equivalence, and the underlying compound Poisson-Gamma theory.

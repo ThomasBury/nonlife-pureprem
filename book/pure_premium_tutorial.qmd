@@ -8,36 +8,65 @@ decision instead of hiding it in `main()`. The full freMTPL2 run can take a
 while; use a small sample only to check that the notebook works, not to draw
 actuarial conclusions.
 
-```{python}
-from itertools import combinations
-from pathlib import Path
-from tempfile import TemporaryDirectory
+The chapter is split between two modes:
 
+- **Library calls** for the heavy machinery (fitting, tuning, table summaries).
+- **By-hand cells** for the *concepts* — portfolio averages, the Lorenz curve,
+  the Gini coefficient — written in plain numpy and pandas so the arithmetic
+  is visible.
+
+Next to the by-hand cells, collapsed callouts reveal the production source
+of the matching library function. That pairing — *the idea in a few lines, the
+tested version underneath* — is what the chapter is for.
+
+```{python}
+from inspect import getsource
+from itertools import combinations
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from IPython.display import Image, display
+from IPython.display import Markdown, display
 
 from nonlife_pureprem import (
     TARGET_SPECS,
     coefficient_relativity_table,
     evaluate_predictions,
     exposure_balanced_double_lift_table,
+    exposure_balanced_lift_table,
     fit_glum_inference,
     fit_glum_predictive,
     fit_lightgbm,
+    gini,
+    grouped_calibration,
     lift_diagnostics,
     lightgbm_frame,
     load_mtpl2,
+    lorenz_curve,
     lorenz_dominance_table,
     make_splits,
     portfolio_calibration_table,
     print_frame,
-    save_core_figures,
     select_tweedie_power,
     target_and_weight,
     target_weight_table,
+    weighted_mean_deviance,
 )
+
+
+def show_source(fn):
+    """Render a library function as a syntax-highlighted code block."""
+    display(Markdown(f"```python\n{getsource(fn)}\n```"))
 ```
+
+::: {.callout-note}
+## A note on figures
+
+All charts in this chapter are produced by inline matplotlib cells — they
+render as native cell outputs, and the plotting code is right there to read.
+The library's `save_core_figures` helper is used by the CLI to write the
+same four figures to disk; it is intentionally not used here.
+:::
 
 ## Set a reproducible run
 
@@ -55,8 +84,6 @@ n_samples = None  # e.g. 10_000 for a quick software smoke run
 n_alphas = 30
 max_rounds = 2_000
 early_stopping_rounds = 50
-charts = TemporaryDirectory(prefix="pure-premium-")
-output_dir = Path(charts.name)
 ```
 
 ## Build audited frequency, severity, and pure-premium targets
@@ -76,6 +103,51 @@ data, audit = load_mtpl2(n_samples=n_samples)
 print_frame("Target and weight definitions", target_weight_table())
 print_frame("Claim preparation", pd.DataFrame([audit]))
 ```
+
+### Portfolio averages by hand
+
+The portfolio averages are the exposure-weighted means of the rates. Because
+frequency, severity, and pure premium are each a risk-volume rate, the
+weighted mean of the rate equals the unweighted ratio of the underlying claim
+amounts:
+
+```{python}
+avg_frequency = data["ClaimNb"].sum() / data["Exposure"].sum()
+avg_frequency_check = np.average(data["Frequency"], weights=data["Exposure"])
+
+avg_pure_premium = data["ClaimAmountCapped"].sum() / data["Exposure"].sum()
+avg_pure_premium_check = np.average(data["PurePremium"], weights=data["Exposure"])
+
+print(f"Average frequency:  {avg_frequency:.6f} claim / year")
+print(f"  check (weighted mean of rate): {avg_frequency_check:.6f}")
+print(f"Average pure premium: {avg_pure_premium:.2f} EUR / year")
+print(f"  check (weighted mean of rate): {avg_pure_premium_check:.2f}")
+```
+
+The two ways of writing the average are identical because each rate is
+defined as `amount / volume`. The same identity is what makes the
+target × weight multiplication collapse to the underlying claim amounts in
+`portfolio_calibration_table` and `evaluate_predictions`.
+
+::: {.callout-note collapse="true"}
+## Look inside: `TARGET_SPECS` and `target_and_weight`
+
+The whole frequency / severity / pure-premium weighting decision lives in
+`TARGET_SPECS` and the `target_and_weight` helper that unpacks it.
+
+```{python}
+show_source(target_and_weight)
+```
+
+Key points:
+
+- `frequency` uses target `Frequency` with weight `Exposure` over all policies.
+- `severity` uses target `Severity` with weight `ClaimNb` over **claims only** —
+  the `claims_only` flag filters rows to `ClaimNb > 0` so the average is
+  the claim-amount weighted mean of the conditional severity.
+- `pure_premium` uses target `PurePremium` with weight `Exposure` over all
+  policies. Multiplying by exposure recovers the total capped claim amount.
+:::
 
 ## Reserve a test set before making modelling choices
 
@@ -146,6 +218,18 @@ unregularized robust GLUM for classical coefficient relativities.
 inference for the penalized predictive fit. Review relativities for
 plausibility, but choose predictions with out-of-sample evidence.
 
+The GLUM model object is built from `RATING_FORMULA` (spline basis on
+`VehAge`, `DrivAge`, `BonusMalus`, plus categorical levels for the vehicle
+and region variables, plus `LogDensity`). The `fit_glum_predictive` helper
+profiles a 3-fold cross-validation over `alpha × l1_ratio`; the fitted
+CV model is `GeneralizedLinearRegressorCV`. For severity, the helper
+appends zero-weight anchor rows so categories absent in the training data
+still receive a defined prediction.
+
+For the full implementation see
+[`src/nonlife_pureprem/pure_premium.py`](https://github.com/ThomasBury/nonlife-pureprem/blob/main/src/nonlife_pureprem/pure_premium.py)
+(`fit_glum_predictive`, `fit_glum_inference`).
+
 ```{python}
 glum_models = {}
 for component in TARGET_SPECS:
@@ -175,6 +259,15 @@ validation, then refit each selected model on the final training data.
 **Best practice:** give every challenger the same train/test protocol, keep
 its search space modest and documented, and require a material test-set gain
 plus stable business behaviour before accepting extra complexity.
+
+The `fit_lightgbm` helper grid-searches `num_leaves ∈ {15, 31}` ×
+`min_child_samples ∈ {100, 500}` (smaller `{20, 50}` for severity to keep
+leaves from collapsing on the smaller claim-bearing set) with early stopping
+on development-validation deviance, then refits the chosen configuration on
+all training rows at the dotted-line `best_iteration`. The full grid, the
+Tweedie objective, and the early-stopping recipe are in
+[`src/nonlife_pureprem/pure_premium.py`](https://github.com/ThomasBury/nonlife-pureprem/blob/main/src/nonlife_pureprem/pure_premium.py)
+(`fit_lightgbm`).
 
 ```{python}
 lightgbm_models = {}
@@ -265,6 +358,30 @@ for component, predictions in (
     )
 ```
 
+The proper score is the weighted mean deviance matched to the response
+distribution. `D2 = 1 - deviance / null_deviance` is the explained-deviance
+share against the weighted-mean null, so a higher D2 is better. The three
+branches of each deviance are visible in the source below.
+
+::: {.callout-note collapse="true"}
+## Look inside: `weighted_mean_deviance`
+
+```{python}
+show_source(weighted_mean_deviance)
+```
+
+Three things to notice:
+
+- the **family** comes from `TARGET_SPECS` — Poisson for frequency, Gamma
+  for severity, Tweedie-weighted deviance for pure premium;
+- the **weight** is the row-appropriate exposure or claim count, so a
+  six-month policy really does count half as much as a twelve-month one;
+- the deviance is per-element (one observation of the response distribution),
+  and `sklearn` averages them with the same weights the model used in
+  fitting — that is what makes the fitted GLUM models' training deviances
+  and deviances on the test set directly comparable.
+:::
+
 ## Check portfolio-level calibration
 
 **Why:** a useful ranking can still charge too much or too little in total.
@@ -296,16 +413,129 @@ for component, predictions in (
 portfolio mean. A monotonic rescaling can preserve ranking while changing A/E.
 
 **What we do:** order test policies from low to high predicted pure premium,
-then plot cumulative exposure against cumulative capped loss. The table states
-whether one Lorenz curve is lower everywhere; Gini summarizes separation.
+then plot cumulative exposure against cumulative capped loss. The Gini
+coefficient summarized below is `1 − 2·AUC` of that curve.
 
 **Best practice:** higher positive Gini is better, but inspect the full curve.
 A lower curve dominates only when it does not cross; crossing curves are not a
 ranking victory. Ranking evidence never replaces calibration evidence.
 
+### Build the Lorenz curve by hand
+
+For one prediction, the ordered Lorenz curve is the consistent pairing of
+the cumulative exposure share and the cumulative observed loss share after
+sorting policies low-to-high by predicted rate. Ties are averaged into a
+single block so the curve does not depend on the test-set row order.
+
 ```{python}
 y_test = splits.test["PurePremium"].to_numpy(dtype=float)
 exposure = splits.test["Exposure"].to_numpy(dtype=float)
+```
+
+```{python}
+reference = "LightGBM Tweedie"
+ref_pred = pure_premium_predictions[reference]
+
+sorted_df = (
+    pd.DataFrame({"y": y_test, "p": ref_pred, "w": exposure})
+    .sort_values("p")
+    .assign(wy=lambda d: d["y"] * d["w"])
+)
+blocks = sorted_df.groupby("p", sort=False)[["w", "wy"]].sum()
+cum_exposure = np.r_[0.0, blocks["w"].cumsum()]
+cum_observed_x_exposure = np.r_[0.0, blocks["wy"].cumsum()]
+F = cum_exposure / cum_exposure[-1]
+L = cum_observed_x_exposure / cum_observed_x_exposure[-1]
+
+fig, axis = plt.subplots(figsize=(6, 5))
+axis.plot(F, L, label=f"{reference} (by hand)")
+axis.plot([0, 1], [0, 1], ls=":", color="grey", label="diagonal")
+axis.set_xlabel("Cumulative exposure share")
+axis.set_ylabel("Cumulative observed loss share")
+axis.set_title(f"Ordered Lorenz curve ({reference})")
+axis.legend()
+plt.show()
+```
+
+Good models bow the curve below the diagonal (loss concentrated in the last
+fraction of predicted exposure). The area under the diagonal is `1/2`, so the
+area *between* the diagonal and the curve is `1/2 − AUC`.
+
+### Compute the Gini coefficient by hand
+
+There are three equivalent faces of the same definition:
+
+1. **Mean-absolute-difference form** (Gini's original),
+   `G = Σᵢ<ⱼ wᵢ wⱼ |yᵢ − yⱼ| / (W² μ)`. Conceptually clearest, O(n²).
+2. **Area form** (the Census Bureau and most actuarial software),
+   `G = 1 − 2·AUC` where the AUC is the area under the ordered Lorenz curve.
+   `np.trapezoid` computes this *exactly* when the curve is piecewise-linear.
+3. **Average-rank form** (the Frees–Meyers–Cummings convention adopted
+   here), `G = 2·Σᵢ wᵢ yᵢ F̄ᵢ / Σᵢ wᵢ yᵢ − 1`, with midrank CDF
+   `F̄ᵢ = (W_{i-1} + wᵢ/2) / W`. Closed form, O(n log n), and naturally
+   tie-safe.
+
+All three are equal whenever predicted rates are distinct. With ties —
+common when a model only uses categorical risk factors — the *area* form
+depends on the within-tie row order (verified below: swapping two tied
+policies changes the value), whereas the *average-rank* form aggregates
+tied blocks into a single step and is permutation-invariant by
+construction.
+
+```{python}
+hand_F = (np.cumsum(blocks["w"]) - blocks["w"] / 2) / blocks["w"].sum()
+gy_by_hand = 2 * (blocks["wy"] * hand_F).sum() / blocks["wy"].sum() - 1
+
+library_gini = gini(y_test, ref_pred, exposure)
+accuracy_row = evaluate_predictions(
+    splits.test, "pure_premium", {reference: ref_pred}, selected_power
+).loc[reference]
+
+print(f"By-hand Gini (midrank): {gy_by_hand:.6f}")
+print(f"Library gini(...)     : {library_gini:.6f}")
+print(f"evaluate_predictions raw_gini: {accuracy_row['raw_gini']:.6f}")
+np.testing.assert_allclose(gy_by_hand, library_gini, atol=1e-12)
+```
+
+The library and the by-hand value agree to machine precision; both equal
+the `raw_gini` column that `evaluate_predictions` already reports.
+
+### Tie order-dependence, demonstrated
+
+The naive `np.trapezoid` over a stable-sorted array (the old implementation)
+**depends on the order of tied policies**, which is the row order of the
+test set. The midrank formula does not:
+
+```{python}
+def old_polygonal_gini(y, p, w):
+    order = np.argsort(p, kind="stable")
+    cw = np.r_[0.0, np.cumsum(w[order])]
+    cl = np.r_[0.0, np.cumsum(w[order] * y[order])]
+    return 1 - 2 * np.trapezoid(cl / cl[-1], cw / cw[-1])
+
+
+y_demo = np.array([5.0, 1.0, 3.0])
+p_demo = np.array([2.0, 1.0, 1.0])
+w_demo = np.ones(3)
+print(f"old polygonal (given order):       {old_polygonal_gini(y_demo, p_demo, w_demo):.4f}")
+print(
+    "old polygonal (tied pair swapped):  "
+    f"{old_polygonal_gini(y_demo[::-1], p_demo[::-1], w_demo[::-1]):.4f}"
+)
+print(f"midrank (given order):              {gini(y_demo, p_demo, w_demo):.4f}")
+print(
+    "midrank (tied pair swapped):         "
+    f"{gini(y_demo[::-1], p_demo[::-1], w_demo[::-1]):.4f}"
+)
+```
+
+For real data with tied predictions (e.g. a GLUM on categorical-only
+features) the two implementations can disagree by several points of Gini.
+That is why the library now uses the tie-safe midrank.
+
+### Compare all four pure-premium predictions
+
+```{python}
 print_frame(
     "Pure-premium Lorenz dominance",
     lorenz_dominance_table(y_test, pure_premium_predictions, exposure),
@@ -321,6 +551,64 @@ print_frame(
 )
 ```
 
+### The Lorenz curve for every model
+
+```{python}
+fig, axis = plt.subplots(figsize=(7, 6))
+axis.plot([0, 1], [0, 1], ls=":", color="grey", label="diagonal")
+for name, prediction in pure_premium_predictions.items():
+    x, y = lorenz_curve(y_test, prediction, exposure)
+    axis.plot(x, y, label=f"{name} (Gini {gini(y_test, prediction, exposure):.3f})")
+axis.set_xlabel("Cumulative exposure share")
+axis.set_ylabel("Cumulative observed loss share")
+axis.set_title("Pure-premium ordered Lorenz curves")
+axis.legend(loc="lower right")
+plt.show()
+```
+
+### Other conventions you will meet
+
+The literature and vendor software use several nonequivalent conventions:
+
+- **Step / shoelace form** (the `sum(L[1:]·W[:-1]) − sum(L[:-1]·W[1:])` form
+  some libraries export). Equal to the area form when there are no ties;
+  differs from it once ties exist.
+- **Vendor grids (e.g. some Emblem-style prints)** use a cumulative-weight
+  grid with unit-weight-adjusted constants (`(0.5·(shift+1)).cumsum() +
+  (0.5·(w−1)).cumsum()`). On integer row weights all conventions agree,
+  but on fractional exposures they differ in the third decimal. The
+  midrank convention adopted here is exact on any positive weights.
+- **Unweighted forms** written as
+  `ΣSᵢ / T − (n+1)/2` over data sorted descending by prediction return
+  *half* the standard Gini (a factor of 2 is missing). That bug is hidden
+  when the consumer divides it by itself, because every normalized Gini
+  ratio cancels the scale error. Worth checking for in any textbook or
+  package you reuse.
+
+::: {.callout-note collapse="true"}
+## Look inside: `lorenz_curve` and `gini`
+
+```{python}
+show_source(lorenz_curve)
+```
+
+The tied-prediction block is detected with `np.unique(return_index=True)`
+and reduced with `np.add.reduceat` on `sort=False` *or* ascending, so a
+straight line spans the block instead of wiggling through within-tie row
+order. The (0, 0) and (1, 1) endpoints come from the leading `0.0` in the
+cumulative arrays and the final normalization.
+
+```{python}
+show_source(gini)
+```
+
+The closed form is equivalent to `1 − 2·AUC` of the same polygonal curve,
+and avoids `np.trapezoid` entirely. Returning `numpy.nan` when the total
+weighted loss is not positive is a deliberate departure from the silent
+`if total > 0` guard the old version had — a degenerate response should
+not get a confidently wrong number.
+:::
+
 ## Inspect single-model lift by predicted-risk decile
 
 **Why:** lift makes ranking concrete: it asks whether observed pure premium
@@ -333,12 +621,33 @@ ten equal-exposure bins and compare observed and predicted pure premium.
 policies have different durations. Inspect credibility, uncertainty, and
 irregular deciles instead of choosing a model from one impressive endpoint.
 
+The full per-decile table for one model is already informative — observed
+should rise with the decile, and observed should track predicted in absolute
+level.
+
 ```{python}
-print_frame(
-    "Pure-premium lift ranges",
-    lift_diagnostics(y_test, pure_premium_predictions, exposure),
+lift_demo = exposure_balanced_lift_table(
+    y_test, pure_premium_predictions["LightGBM Tweedie"], exposure
 )
+print_frame("LightGBM Tweedie — per-decile lift", lift_demo)
 ```
+
+The summary `lift_diagnostics` table only lists the first and last decile
+plus the range; the full table above is what those come from.
+
+::: {.callout-note collapse="true"}
+## Look inside: `exposure_balanced_lift_table`
+
+```{python}
+show_source(exposure_balanced_lift_table)
+```
+
+The boundary-row interpolation is the part the per-decile summary hides.
+Equal-exposure deciles are placed at `cum_exposure[-1] * k / 10`, and a
+single policy can be split across two deciles by `np.interp` so the decile
+exposures come out exactly equal. The cost is that the per-row attribution
+is a piecewise interpolation, not a sum over an integer subset of rows.
+:::
 
 ## Use double lift to examine where models disagree
 
@@ -368,31 +677,120 @@ for (model_a, prediction_a), (model_b, prediction_b) in combinations(
     )
 ```
 
+::: {.callout-note collapse="true"}
+## Look inside: `exposure_balanced_double_lift_table`
+
+```{python}
+show_source(exposure_balanced_double_lift_table)
+```
+
+The double-lift table is built the same way as the single-model lift table:
+policies are sorted by the model-A / model-B ratio, cumulative exposure and
+cumulative A-rate, B-rate, and observed rates are computed, and `np.interp`
+splits boundary rows so the deciles are exactly equal-exposure. The middle
+deciles carry the most diagnostic signal: the endpoints are anchors by
+construction.
+:::
+
 ## Render the evidence together
 
 **Why:** tables give exact values; charts reveal shape, crossings, and local
 failures that summary statistics can hide.
 
-**What we do:** save the calibration, Lorenz, lift, and double-lift figures
-produced by the shared tutorial code, then display them inline.
+**What we do:** draw the calibration, Lorenz, lift, and double-lift figures
+inline with matplotlib so the plotting code lives next to the data.
 
 **Best practice:** select a model only when its accuracy, calibration,
 ranking, lift, stability, and business constraints agree. Record the locked
 test result before recalibrating or deploying the selected model.
 
+### Calibration by driver age
+
+The shared `grouped_calibration` helper bins policies by `pd.qcut(DrivAge, 10)`
+and reports the observed and predicted rate per band. For frequency the
+weight is exposure; for severity the weight is claim count.
+
 ```{python}
-save_core_figures(
-    splits.test,
-    frequency_predictions,
-    severity_predictions,
-    pure_premium_predictions,
-    output_dir,
-)
-for chart in (
-    "component_calibration.png",
-    "pure_premium_lorenz.png",
-    "pure_premium_lift.png",
-    "pure_premium_double_lift.png",
+fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+for axis, component, predictions in (
+    (axes[0], "frequency", frequency_predictions),
+    (axes[1], "severity", severity_predictions),
 ):
-    display(Image(filename=output_dir / chart))
+    calibration = grouped_calibration(splits.test, component, predictions)
+    x = np.arange(len(calibration))
+    axis.plot(x, calibration["observed"], "o-", label="observed")
+    for name in predictions:
+        axis.plot(x, calibration[name], "--", label=name)
+    axis.set_title(f"{component.title()} by driver age")
+    axis.set_xlabel("Driver-age band")
+    axis.set_ylabel("Rate")
+    axis.set_xticks(x)
+    axis.set_xticklabels(calibration.index, rotation=45, ha="right")
+    axis.legend()
+plt.tight_layout()
+plt.show()
+```
+
+### Pure-premium Lorenz curves
+
+```{python}
+fig, axis = plt.subplots(figsize=(7, 6))
+axis.plot([0, 1], [0, 1], ls=":", color="grey", label="diagonal")
+for name, prediction in pure_premium_predictions.items():
+    x, y = lorenz_curve(y_test, prediction, exposure)
+    axis.plot(x, y, label=f"{name} (Gini {gini(y_test, prediction, exposure):.3f})")
+axis.set_xlabel("Cumulative exposure share")
+axis.set_ylabel("Cumulative observed loss share")
+axis.set_title("Pure-premium ordered Lorenz curves")
+axis.legend(loc="lower right")
+plt.show()
+```
+
+### Per-model lift diagrams
+
+```{python}
+fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
+for axis, (name, prediction) in zip(axes.flat, pure_premium_predictions.items()):
+    lift = exposure_balanced_lift_table(y_test, prediction, exposure)
+    lift_axis = lift.index
+    axis.plot(lift_axis, lift["observed_rate"], "o-", label="observed")
+    axis.plot(lift_axis, lift["predicted_rate"], "s--", label="predicted")
+    axis.set_title(name)
+    axis.set_xlabel("Exposure-balanced decile")
+    axis.set_ylabel("Pure premium")
+    axis.legend()
+plt.tight_layout()
+plt.show()
+```
+
+### Double-lift panels
+
+Four diagnosed pairs — same ones the CLI's `save_core_figures` writes by
+default. A/B ratio sorting means decile 1 is the A-favoring tail and decile 10
+is the B-favoring tail.
+
+```{python}
+chosen_pairs = [
+    ("GLUM frequency x severity", "LightGBM frequency x severity"),
+    ("GLUM Tweedie", "LightGBM Tweedie"),
+    ("GLUM frequency x severity", "GLUM Tweedie"),
+    ("LightGBM frequency x severity", "LightGBM Tweedie"),
+]
+fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
+for axis, (model_a, model_b) in zip(axes.flat, chosen_pairs):
+    lift = exposure_balanced_double_lift_table(
+        y_test,
+        pure_premium_predictions[model_a],
+        pure_premium_predictions[model_b],
+        exposure,
+    )
+    axis.plot(lift.index, lift["observed_rate"], "o-", label="observed")
+    axis.plot(lift.index, lift["model_a_rate"], "s--", label=f"A: {model_a}")
+    axis.plot(lift.index, lift["model_b_rate"], "^:", label=f"B: {model_b}")
+    axis.set_title(f"{model_a} / {model_b}")
+    axis.set_xlabel("A/B ratio decile")
+    axis.set_ylabel("Pure premium")
+    axis.legend()
+plt.tight_layout()
+plt.show()
 ```

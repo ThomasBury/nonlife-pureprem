@@ -1,4 +1,5 @@
 /.quarto/
 /_book/
+*_files/
 **/*.quarto_ipynb
 **/*.quarto_ipynb_*

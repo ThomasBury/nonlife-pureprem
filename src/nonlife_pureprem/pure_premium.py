@@ -550,15 +550,27 @@ def lorenz_curve(
     y_pred_rate: np.ndarray,
     weight: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return a low-to-high Lorenz curve including both endpoints."""
+    """Return a low-to-high Lorenz curve including both endpoints.
+
+    Tied predictions are aggregated into a single block so the curve is
+    permutation-invariant. The block midpoint is reached once, giving a
+    straight line across the tied block (the standard convention when
+    average ranks are used).
+    """
     y_true_rate = np.asarray(y_true_rate, dtype=float)
     y_pred_rate = np.asarray(y_pred_rate, dtype=float)
     weight = np.asarray(weight, dtype=float)
     if np.any(weight <= 0) or weight.sum() <= 0:
         raise ValueError("Lorenz weights must be positive")
     order = np.argsort(y_pred_rate, kind="stable")
-    cumulative_weight = np.r_[0.0, np.cumsum(weight[order])]
-    cumulative_loss = np.r_[0.0, np.cumsum(weight[order] * y_true_rate[order])]
+    sorted_pred = y_pred_rate[order]
+    sorted_weight = weight[order]
+    sorted_observed = y_true_rate[order]
+    _, starts = np.unique(sorted_pred, return_index=True)
+    block_weight = np.add.reduceat(sorted_weight, starts)
+    block_observed = np.add.reduceat(sorted_weight * sorted_observed, starts)
+    cumulative_weight = np.r_[0.0, np.cumsum(block_weight)]
+    cumulative_loss = np.r_[0.0, np.cumsum(block_observed)]
     cumulative_weight /= cumulative_weight[-1]
     if cumulative_loss[-1] > 0:
         cumulative_loss /= cumulative_loss[-1]
@@ -622,9 +634,38 @@ def gini(
     y_pred_rate: np.ndarray,
     weight: np.ndarray,
 ) -> float:
-    """Compute raw Gini for the tutorial's low-to-high ordering."""
-    cumulative_weight, cumulative_loss = lorenz_curve(y_true_rate, y_pred_rate, weight)
-    return float(1 - 2 * np.trapezoid(cumulative_loss, cumulative_weight))
+    """Compute the weighted Gini coefficient for a low-to-high ordering.
+
+    Uses the average-rank (midrank) closed form
+
+        G = 2 * sum_i (w_i y_i Fbar_i) / sum_i (w_i y_i) - 1,
+        Fbar_i = (W_{i-1} + w_i / 2) / W,
+
+    which is the Frees-Meyers-Cummings convention. Tied predictions are
+    aggregated into single blocks so the value is permutation-invariant;
+    the resulting Gini equals 1 - 2 * AUC of the tie-corrected polygonal
+    Lorenz curve. Returns ``numpy.nan`` when total weighted loss is not
+    positive (no average can be defined).
+    """
+    y_true_rate = np.asarray(y_true_rate, dtype=float)
+    y_pred_rate = np.asarray(y_pred_rate, dtype=float)
+    weight = np.asarray(weight, dtype=float)
+    if np.any(weight <= 0) or weight.sum() <= 0:
+        raise ValueError("Gini weights must be positive")
+    order = np.argsort(y_pred_rate, kind="stable")
+    sorted_pred = y_pred_rate[order]
+    sorted_weight = weight[order]
+    sorted_observed = y_true_rate[order]
+    _, starts = np.unique(sorted_pred, return_index=True)
+    block_weight = np.add.reduceat(sorted_weight, starts)
+    block_weighted_y = np.add.reduceat(sorted_weight * sorted_observed, starts)
+    total_weight = block_weight.sum()
+    total_loss = block_weighted_y.sum()
+    if total_loss <= 0:
+        return float("nan")
+    cumulative_weight = np.cumsum(block_weight)
+    f_mid = (cumulative_weight - block_weight / 2) / total_weight
+    return float(2.0 * (block_weighted_y * f_mid).sum() / total_loss - 1.0)
 
 
 def exposure_balanced_lift_table(

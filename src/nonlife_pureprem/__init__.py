@@ -14,6 +14,7 @@ from nonlife_pureprem.pure_premium import (
     fit_glum_inference,
     fit_glum_predictive,
     fit_lightgbm,
+    gini,
     grouped_calibration,
     lift_diagnostics,
     lightgbm_frame,
@@ -28,6 +29,7 @@ from nonlife_pureprem.pure_premium import (
     select_tweedie_power,
     target_and_weight,
     target_weight_table,
+    weighted_mean_deviance,
 )
 
 __all__ = [
@@ -44,6 +46,7 @@ __all__ = [
     "fit_glum_inference",
     "fit_glum_predictive",
     "fit_lightgbm",
+    "gini",
     "grouped_calibration",
     "lift_diagnostics",
     "lightgbm_frame",
@@ -58,4 +61,5 @@ __all__ = [
     "select_tweedie_power",
     "target_and_weight",
     "target_weight_table",
+    "weighted_mean_deviance",
 ]
