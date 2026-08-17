@@ -17,6 +17,7 @@ format:
     theme: cosmo
     code-fold: false
     toc: true
+    html-math-method: katex
 
 execute:
   enabled: true

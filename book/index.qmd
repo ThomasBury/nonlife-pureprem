@@ -25,8 +25,8 @@ data. It follows the pricing workflow in order:
 
 The tutorial produces four final pure-premium predictions:
 
-- GLUM frequency × GLUM severity;
-- LightGBM frequency × LightGBM severity;
+- GLUM frequency $\times$ GLUM severity;
+- LightGBM frequency $\times$ LightGBM severity;
 - direct GLUM Tweedie;
 - direct LightGBM Tweedie.
 
