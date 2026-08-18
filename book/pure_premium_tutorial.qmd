@@ -20,6 +20,7 @@ The chapter is split between two modes:
 from inspect import getsource
 from itertools import combinations
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -54,15 +55,88 @@ from nonlife_pureprem import (
 def show_source(fn):
     """Render a library function as a syntax-highlighted code block."""
     display(Markdown(f"```python\n{getsource(fn)}\n```"))
+
+
+MODEL_COLORS = {
+    "observed": "#000000",
+    "GLUM": "#E69F00",
+    "LightGBM": "#56B4E9",
+    "GLUM frequency x severity": "#E69F00",
+    "LightGBM frequency x severity": "#56B4E9",
+    "GLUM Tweedie": "#009E73",
+    "LightGBM Tweedie": "#D55E00",
+}
+
+
+def hexbin_grid(
+    xy_by_model, xlabel, ylabel, logx=False, logy=False, reference="diag",
+    extent_mode="auto",
+):
+    """Draw one hexbin panel per model on a shared log-count colour scale.
+
+    ``extent_mode`` clips hexbinning (and the axis limits) to the predicted-value
+    span when the panel is linear:
+    - ``"diag"`` uses ``(xmin, xmax)`` on both axes (predicted vs observed).
+    - ``"residual"`` uses ``(xmin, xmax)`` on x and the symmetric predicted span
+      on y (residual panel).
+    - ``"auto"`` leaves hexbinning and limits alone (log panels).
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    artists = []
+    for axis, (name, (x, y)) in zip(axes.flat, xy_by_model.items()):
+        xlo, xhi = float(x.min()), float(x.max())
+        if extent_mode == "diag" and not logx and not logy:
+            ylo, yhi = xlo, xhi
+            extent = (xlo, xhi, ylo, yhi)
+        elif extent_mode == "residual" and not logx and not logy:
+            span = xhi - xlo
+            extent = (xlo, xhi, -span, span)
+        else:
+            extent = None
+        hb = axis.hexbin(
+            x,
+            y,
+            gridsize=40,
+            mincnt=1,
+            cmap="cividis",
+            linewidths=0.2,
+            xscale="log" if logx else "linear",
+            yscale="log" if logy else "linear",
+            extent=extent,
+        )
+        artists.append(hb)
+        axis.set_title(name)
+        axis.set_xlabel(xlabel)
+        axis.set_ylabel(ylabel)
+        if reference == "diag":
+            if extent is not None:
+                ref_lo, ref_hi = max(xlo, extent[2]), min(xhi, extent[3])
+            else:
+                ref_lo, ref_hi = min(x.min(), y.min()), max(x.max(), y.max())
+            axis.plot([ref_lo, ref_hi], [ref_lo, ref_hi], ":", color="grey")
+        elif reference == "zero":
+            axis.axhline(0.0, ls=":", color="grey")
+        if extent is not None:
+            axis.set_xlim(extent[0], extent[1])
+            axis.set_ylim(extent[2], extent[3])
+    vmax = max(float(artist.get_array().max()) for artist in artists)
+    for artist in artists:
+        artist.set_norm(mcolors.LogNorm(1.0, vmax))
+    colorbar = fig.colorbar(artists[0], ax=axes, fraction=0.03)
+    colorbar.set_label("policies per bin")
+    plt.show()
 ```
 
 ::: {.callout-note}
 ## A note on figures
 
-All charts in this chapter are produced by inline matplotlib cells — they
+All charts in this chapter are produced by inline matplotlib cells, they
 render as native cell outputs, and the plotting code is right there to read.
-The library's `save_core_figures` helper is used by the CLI to write the
-same four figures to disk; it is intentionally not used here.
+Line charts share one colourblind-safe Okabe–Ito palette assigned per model
+(`MODEL_COLORS` in the setup cell); dense two-dimensional bins use the
+perceptually uniform, colourblind-safe cividis colormap. The library's
+`save_core_figures` helper is used by the CLI to write the same four figures
+to disk; it is intentionally not used here.
 :::
 
 ## Set a reproducible run
@@ -138,7 +212,7 @@ Step-by-step:
    `TARGET_SPECS` dict (frequency, severity, or pure_premium).
 2. **Slice the rows** if `claims_only` is `True` (used for severity), keeping
    only policies with `ClaimNb > 0`.
-3. **Return** `(rows, target_array, weight_array)` — the target array is
+3. **Return** `(rows, target_array, weight_array)`, the target array is
    the chosen column, the weight array is the row-appropriate exposure or
    claim count.
 
@@ -149,7 +223,7 @@ show_source(target_and_weight)
 Key points:
 
 - `frequency` uses target `Frequency` with weight `Exposure` over all policies.
-- `severity` uses target `Severity` with weight `ClaimNb` over **claims only** —
+- `severity` uses target `Severity` with weight `ClaimNb` over **claims only**, 
   the `claims_only` flag filters rows to `ClaimNb > 0` so the average is
   the claim-amount weighted mean of the conditional severity.
 - `pure_premium` uses target `PurePremium` with weight `Exposure` over all
@@ -341,7 +415,13 @@ pure_premium_predictions = {
         lightgbm_models["pure_premium"].predict(test_features), dtype=float
     ),
 }
+y_test = splits.test["PurePremium"].to_numpy(dtype=float)
+exposure = splits.test["Exposure"].to_numpy(dtype=float)
 ```
+
+The `y_test` and `exposure` arrays defined above are the observed pure
+premium and the exposure of every untouched test policy; every diagnostic
+below uses them.
 
 ## Compare predictive accuracy with the proper score
 
@@ -377,7 +457,7 @@ branches of each deviance are visible in the source below.
 
 Step-by-step:
 
-1. **Choose the family** from `TARGET_SPECS[component]` — Poisson, Gamma,
+1. **Choose the family** from `TARGET_SPECS[component]` , Poisson, Gamma,
    or Tweedie.
 2. **Pick the matching sklearn deviance** function for the family and the
    specified power (`p=1` for Poisson, `p=2` for Gamma, the chosen `p`
@@ -385,7 +465,7 @@ Step-by-step:
 3. **Compute the per-element** deviance using `sklearn.metrics.mean_*_deviance`,
    which returns a weighted mean in the same call. We pass the exposure
    or claim-count weights so a six-month policy counts half as much as a
-   twelve-month one — directly comparable to the deviance the model
+   twelve-month one, directly comparable to the deviance the model
    minimized during fitting.
 
 ```{python}
@@ -394,24 +474,26 @@ show_source(weighted_mean_deviance)
 
 Three things to notice:
 
-- the **family** comes from `TARGET_SPECS` — Poisson for frequency, Gamma
+- the **family** comes from `TARGET_SPECS`, Poisson for frequency, Gamma
   for severity, Tweedie-weighted deviance for pure premium;
 - the **weight** is the row-appropriate exposure or claim count, so a
   six-month policy really does count half as much as a twelve-month one;
 - the deviance is per-element (one observation of the response distribution),
   and `sklearn` averages them with the same weights the model used in
-  fitting — that is what makes the fitted GLUM models' training deviances
+  fitting, that is what makes the fitted GLUM models' training deviances
   and deviances on the test set directly comparable.
 :::
 
-## Check portfolio-level calibration
+## Check calibration in total and by segment
 
 **Why:** a useful ranking can still charge too much or too little in total.
 Portfolio calibration asks whether total expected claims match total observed
-claims.
+claims; segment calibration asks whether the total is right *everywhere*, not
+just on average.
 
 **What we do:** calculate test actual/expected (A/E), observed total, and
-predicted total for frequency, severity, and pure premium.
+predicted total for frequency, severity, and pure premium, then compare
+observed and predicted rates by driver-age band.
 
 **Best practice:** A/E near 1 is necessary but not sufficient. Quantify its
 uncertainty and repeat by meaningful segments and time periods; a perfect
@@ -429,6 +511,134 @@ for component, predictions in (
     )
 ```
 
+### Calibration by driver age
+
+Tables give exact totals; the banded view reveals shape, crossings, and local
+failures that summary statistics can hide. The shared `grouped_calibration`
+helper bins policies by `pd.qcut(DrivAge, 10)` and reports the observed and
+predicted rate per band. For frequency the weight is exposure; for severity
+the weight is claim count.
+
+```{python}
+fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+for axis, component, predictions in (
+    (axes[0], "frequency", frequency_predictions),
+    (axes[1], "severity", severity_predictions),
+):
+    calibration = grouped_calibration(splits.test, component, predictions)
+    x = np.arange(len(calibration))
+    axis.plot(
+        x,
+        calibration["observed"],
+        "o-",
+        color=MODEL_COLORS["observed"],
+        label="observed",
+    )
+    for name in predictions:
+        axis.plot(
+            x, calibration[name], "--", color=MODEL_COLORS[name], label=name
+        )
+    axis.set_title(f"{component.title()} by driver age")
+    axis.set_xlabel("Driver-age band")
+    axis.set_ylabel("Rate")
+    axis.set_xticks(x)
+    axis.set_xticklabels(calibration.index, rotation=45, ha="right")
+    axis.legend()
+plt.tight_layout()
+plt.show()
+```
+
+## Inspect single-model lift by predicted-risk decile
+
+**Why:** lift makes ranking concrete: it asks whether observed pure premium
+rises with the risk bands that a model predicts. It is also a calibration
+check by decile, observed should track predicted in absolute level, so it
+bridges the calibration evidence above and the ranking evidence below.
+
+**What we do:** divide test exposure, from safest to riskiest prediction, into
+ten equal-exposure bins and compare observed and predicted pure premium.
+
+**Best practice:** use equal exposure rather than equal policy counts when
+policies have different durations. Inspect credibility, uncertainty, and
+irregular deciles instead of choosing a model from one impressive endpoint.
+
+The full per-decile table for one model is already informative, observed
+should rise with the decile, and observed should track predicted in absolute
+level.
+
+```{python}
+lift_demo = exposure_balanced_lift_table(
+    y_test, pure_premium_predictions["LightGBM Tweedie"], exposure
+)
+print_frame("LightGBM Tweedie: per-decile lift", lift_demo)
+```
+
+The summary `lift_diagnostics` table only lists the first and last decile
+plus the range; the full table above is what those come from.
+
+::: {.callout-note collapse="true"}
+## Look inside: `exposure_balanced_lift_table`
+
+Step-by-step:
+
+1. **Validate** that `n_bins` is positive and the exposure array has all
+   positive entries.
+2. **Sort** predictions ascending with `kind="stable"`, then take the
+   cumulative exposure, cumulative exposure $\cdot y$, and cumulative
+   exposure $\cdot \hat p$; prepend `0.0` so the array starts at the origin.
+3. **Place the decile boundaries** at `np.linspace(0, cum_exposure[-1], n_bins + 1)`
+    exactly equal total exposure per bin.
+4. **Interpolate** the cumulative observed and predicted series at each
+   boundary with `np.interp`. This is the boundary-row split: a single
+   policy that straddles a boundary is split across two deciles so the
+   per-decile exposure comes out exactly equal.
+5. **Return** a DataFrame of per-decile exposure, observed rate, and
+   predicted rate, indexed by decile.
+
+```{python}
+show_source(exposure_balanced_lift_table)
+```
+
+The boundary-row interpolation is the part the per-decile summary hides.
+Equal-exposure deciles are placed at $k \cdot W / N$, and a single policy
+can be split across two deciles by `np.interp` so the decile exposures come
+out exactly equal. The cost is that the per-row attribution is a piecewise
+interpolation, not a sum over an integer subset of rows.
+:::
+
+### Per-model lift diagrams
+
+The same table as a chart for each of the four pure-premium models: the
+*gap* between observed and predicted per decile is the calibration part,
+the observed *range* across deciles is the ranking part.
+
+```{python}
+fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
+for axis, (name, prediction) in zip(axes.flat, pure_premium_predictions.items()):
+    lift = exposure_balanced_lift_table(y_test, prediction, exposure)
+    lift_axis = lift.index
+    axis.plot(
+        lift_axis,
+        lift["observed_rate"],
+        "o-",
+        color=MODEL_COLORS["observed"],
+        label="observed",
+    )
+    axis.plot(
+        lift_axis,
+        lift["predicted_rate"],
+        "s--",
+        color=MODEL_COLORS[name],
+        label="predicted",
+    )
+    axis.set_title(name)
+    axis.set_xlabel("Exposure-balanced decile")
+    axis.set_ylabel("Pure premium")
+    axis.legend()
+plt.tight_layout()
+plt.show()
+```
+
 ## Test ranking ability with Lorenz curves and Gini
 
 **Why:** pricing needs to order safer and riskier policies, not merely hit the
@@ -442,17 +652,12 @@ coefficient summarized below is $1 - 2 \cdot \mathrm{AUC}$ of that curve.
 A lower curve dominates only when it does not cross; crossing curves are not a
 ranking victory. Ranking evidence never replaces calibration evidence.
 
-### Build the Lorenz curve by hand
+### The ordered Lorenz curve
 
 For one prediction, the ordered Lorenz curve is the consistent pairing of
 the cumulative exposure share and the cumulative observed loss share after
 sorting policies low-to-high by predicted rate. Ties are averaged into a
 single block so the curve does not depend on the test-set row order.
-
-```{python}
-y_test = splits.test["PurePremium"].to_numpy(dtype=float)
-exposure = splits.test["Exposure"].to_numpy(dtype=float)
-```
 
 ### Compute the Gini coefficient by hand
 
@@ -470,8 +675,8 @@ There are three equivalent faces of the same definition:
    midrank CDF $\bar F_i = (W_{i-1} + w_i/2) / W$. Closed form, $O(n \log n)$,
    and naturally tie-safe.
 
-All three are equal whenever predicted rates are distinct. With ties —
-common when a model only uses categorical risk factors — the *area* form
+All three are equal whenever predicted rates are distinct. With ties,
+common when a model only uses categorical risk factors, the *area* form
 depends on the within-tie row order, whereas the *average-rank* form
 aggregates tied blocks into a single step and is permutation-invariant by
 construction. The library ties these extra cases off; the `gini` and
@@ -516,7 +721,12 @@ fig, axis = plt.subplots(figsize=(7, 6))
 axis.plot([0, 1], [0, 1], ls=":", color="grey", label="diagonal")
 for name, prediction in pure_premium_predictions.items():
     x, y = lorenz_curve(y_test, prediction, exposure)
-    axis.plot(x, y, label=f"{name} (Gini {gini(y_test, prediction, exposure):.3f})")
+    axis.plot(
+        x,
+        y,
+        color=MODEL_COLORS[name],
+        label=f"{name} (Gini {gini(y_test, prediction, exposure):.3f})",
+    )
 axis.set_xlabel("Cumulative exposure share")
 axis.set_ylabel("Cumulative observed loss share")
 axis.set_title("Pure-premium ordered Lorenz curves")
@@ -570,7 +780,7 @@ show_source(lorenz_curve)
    reduce, cumulative sums) to keep Gini and the Lorenz curve on the
    same footing.
 2. **Compute the midrank CDF** $\bar F_i = (W_{i-1} + w_i/2) / W$ per
-   block — the average of the block's left and right boundary share.
+   block: the average of the block's left and right boundary share.
 3. **Return** $G = 2 \cdot \sum_i w_i y_i \bar F_i / \sum_i w_i y_i - 1$,
    or `numpy.nan` when the total weighted loss is not positive.
 
@@ -581,64 +791,8 @@ show_source(gini)
 The closed form is equivalent to $1 - 2 \cdot \mathrm{AUC}$ of the same
 polygonal curve, and avoids `np.trapezoid` entirely. Returning
 `numpy.nan` when the total weighted loss is not positive is a deliberate
-departure from the silent `if total > 0` guard the old version had — a
+departure from the silent `if total > 0` guard the old version had, a
 degenerate response should not get a confidently wrong number.
-:::
-
-## Inspect single-model lift by predicted-risk decile
-
-**Why:** lift makes ranking concrete: it asks whether observed pure premium
-rises with the risk bands that a model predicts.
-
-**What we do:** divide test exposure, from safest to riskiest prediction, into
-ten equal-exposure bins and compare observed and predicted pure premium.
-
-**Best practice:** use equal exposure rather than equal policy counts when
-policies have different durations. Inspect credibility, uncertainty, and
-irregular deciles instead of choosing a model from one impressive endpoint.
-
-The full per-decile table for one model is already informative — observed
-should rise with the decile, and observed should track predicted in absolute
-level.
-
-```{python}
-lift_demo = exposure_balanced_lift_table(
-    y_test, pure_premium_predictions["LightGBM Tweedie"], exposure
-)
-print_frame("LightGBM Tweedie — per-decile lift", lift_demo)
-```
-
-The summary `lift_diagnostics` table only lists the first and last decile
-plus the range; the full table above is what those come from.
-
-::: {.callout-note collapse="true"}
-## Look inside: `exposure_balanced_lift_table`
-
-Step-by-step:
-
-1. **Validate** that `n_bins` is positive and the exposure array has all
-   positive entries.
-2. **Sort** predictions ascending with `kind="stable"`, then take the
-   cumulative exposure, cumulative exposure $\cdot y$, and cumulative
-   exposure $\cdot \hat p$; prepend `0.0` so the array starts at the origin.
-3. **Place the decile boundaries** at `np.linspace(0, cum_exposure[-1], n_bins + 1)`
-   — exactly equal total exposure per bin.
-4. **Interpolate** the cumulative observed and predicted series at each
-   boundary with `np.interp`. This is the boundary-row split: a single
-   policy that straddles a boundary is split across two deciles so the
-   per-decile exposure comes out exactly equal.
-5. **Return** a DataFrame of per-decile exposure, observed rate, and
-   predicted rate, indexed by decile.
-
-```{python}
-show_source(exposure_balanced_lift_table)
-```
-
-The boundary-row interpolation is the part the per-decile summary hides.
-Equal-exposure deciles are placed at $k \cdot W / N$, and a single policy
-can be split across two deciles by `np.interp` so the decile exposures come
-out exactly equal. The cost is that the per-row attribution is a piecewise
-interpolation, not a sum over an integer subset of rows.
 :::
 
 ## Use double lift to examine where models disagree
@@ -700,80 +854,9 @@ deciles carry the most diagnostic signal: the endpoints are anchored by
 construction.
 :::
 
-## Render the evidence together
-
-**Why:** tables give exact values; charts reveal shape, crossings, and local
-failures that summary statistics can hide.
-
-**What we do:** draw the calibration, Lorenz, lift, and double-lift figures
-inline with matplotlib so the plotting code lives next to the data.
-
-**Best practice:** select a model only when its accuracy, calibration,
-ranking, lift, stability, and business constraints agree. Record the locked
-test result before recalibrating or deploying the selected model.
-
-### Calibration by driver age
-
-The shared `grouped_calibration` helper bins policies by `pd.qcut(DrivAge, 10)`
-and reports the observed and predicted rate per band. For frequency the
-weight is exposure; for severity the weight is claim count.
-
-```{python}
-fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
-for axis, component, predictions in (
-    (axes[0], "frequency", frequency_predictions),
-    (axes[1], "severity", severity_predictions),
-):
-    calibration = grouped_calibration(splits.test, component, predictions)
-    x = np.arange(len(calibration))
-    axis.plot(x, calibration["observed"], "o-", label="observed")
-    for name in predictions:
-        axis.plot(x, calibration[name], "--", label=name)
-    axis.set_title(f"{component.title()} by driver age")
-    axis.set_xlabel("Driver-age band")
-    axis.set_ylabel("Rate")
-    axis.set_xticks(x)
-    axis.set_xticklabels(calibration.index, rotation=45, ha="right")
-    axis.legend()
-plt.tight_layout()
-plt.show()
-```
-
-### Pure-premium Lorenz curves
-
-```{python}
-fig, axis = plt.subplots(figsize=(7, 6))
-axis.plot([0, 1], [0, 1], ls=":", color="grey", label="diagonal")
-for name, prediction in pure_premium_predictions.items():
-    x, y = lorenz_curve(y_test, prediction, exposure)
-    axis.plot(x, y, label=f"{name} (Gini {gini(y_test, prediction, exposure):.3f})")
-axis.set_xlabel("Cumulative exposure share")
-axis.set_ylabel("Cumulative observed loss share")
-axis.set_title("Pure-premium ordered Lorenz curves")
-axis.legend(loc="lower right")
-plt.show()
-```
-
-### Per-model lift diagrams
-
-```{python}
-fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
-for axis, (name, prediction) in zip(axes.flat, pure_premium_predictions.items()):
-    lift = exposure_balanced_lift_table(y_test, prediction, exposure)
-    lift_axis = lift.index
-    axis.plot(lift_axis, lift["observed_rate"], "o-", label="observed")
-    axis.plot(lift_axis, lift["predicted_rate"], "s--", label="predicted")
-    axis.set_title(name)
-    axis.set_xlabel("Exposure-balanced decile")
-    axis.set_ylabel("Pure premium")
-    axis.legend()
-plt.tight_layout()
-plt.show()
-```
-
 ### Double-lift panels
 
-Four diagnosed pairs — same ones the CLI's `save_core_figures` writes by
+Four diagnosed pairs: same ones the CLI's `save_core_figures` writes by
 default. A/B ratio sorting means decile 1 is the A-favoring tail and decile 10
 is the B-favoring tail.
 
@@ -792,9 +875,27 @@ for axis, (model_a, model_b) in zip(axes.flat, chosen_pairs):
         pure_premium_predictions[model_b],
         exposure,
     )
-    axis.plot(lift.index, lift["observed_rate"], "o-", label="observed")
-    axis.plot(lift.index, lift["model_a_rate"], "s--", label=f"A: {model_a}")
-    axis.plot(lift.index, lift["model_b_rate"], "^:", label=f"B: {model_b}")
+    axis.plot(
+        lift.index,
+        lift["observed_rate"],
+        "o-",
+        color=MODEL_COLORS["observed"],
+        label="observed",
+    )
+    axis.plot(
+        lift.index,
+        lift["model_a_rate"],
+        "s--",
+        color=MODEL_COLORS[model_a],
+        label=f"A: {model_a}",
+    )
+    axis.plot(
+        lift.index,
+        lift["model_b_rate"],
+        "^:",
+        color=MODEL_COLORS[model_b],
+        label=f"B: {model_b}",
+    )
     axis.set_title(f"{model_a} / {model_b}")
     axis.set_xlabel("A/B ratio decile")
     axis.set_ylabel("Pure premium")
@@ -803,16 +904,182 @@ plt.tight_layout()
 plt.show()
 ```
 
+## Inspect the full prediction distribution with hexbin plots
+
+**Why:** every score so far compresses each policy into one number.
+Hexagonally binned scatter plots of predicted against observed pure premium,
+and of the residuals, show the joint distribution the summaries hide: the
+mass of claim-free policies, the heavy observed tail, and where errors
+concentrate.
+
+**What we do:** for each of the four pure-premium models, plot predicted vs
+observed and residual hexbins on two scales: linear axes for the bulk
+spanned by the predicted values, and log axes for the tail spanned by the
+observed values. Colour encodes the policy count per bin on a log scale,
+using the perceptually uniform, colourblind-safe cividis colormap; one
+shared colour scale per figure.
+
+**Best practice:** use perceptually-uniform, colourblind-safe colormaps
+(never jet/rainbow), keep the colour scale comparable
+within a figure, and remember the bins count policies, not exposure. Dense
+scatter views complement, never replace, the proper score and the lift
+tables.
+
+### Predicted vs observed, linear axes
+
+The bulk of the data sits in the span of the predictions; the horizontal
+band at observed = 0 is the claim-free mass of the portfolio, not an error.
+The panel view is clipped to the predicted-value range on both axes so a
+handful of very large observed losses do not squash the bulk; the largest
+outliers lie off-view by construction, and the log-log panel below shows
+them.
+
+```{python}
+hexbin_grid(
+    {
+        name: (prediction, y_test)
+        for name, prediction in pure_premium_predictions.items()
+    },
+    "Predicted pure premium",
+    "Observed pure premium",
+    reference="diag",
+    extent_mode="diag",
+)
+```
+
+### Predicted vs observed, log axes
+
+Restricting to observed > 0 drops the claim-free mass (zeros cannot be
+logged) and reveals whether the model tracks the observed tail, where the
+money is. Hexagon widths are equal in log space, so each decade of observed
+loss gets comparable resolution.
+
+```{python}
+claims = y_test > 0
+hexbin_grid(
+    {
+        name: (prediction[claims], y_test[claims])
+        for name, prediction in pure_premium_predictions.items()
+    },
+    "Predicted pure premium (log scale)",
+    "Observed pure premium (log scale)",
+    logx=True,
+    logy=True,
+    reference="diag",
+)
+```
+
+### Residuals vs predicted, linear axes
+
+Subtracting the prediction removes the level: what should remain is a band
+symmetric around zero across the whole predicted range. The y-axis is
+clipped to the symmetric ±predicted span so a handful of large observed
+losses do not drive the view; the densest mass and the trend are what to
+read.
+
+**What to look for:**
+
+- **Band centred on zero across the full predicted range** the model is
+  locally unbiased at every level; what remains is noise. A *flat*
+  vertical shift off zero would be fixable by a single recalibration
+  factor (the portfolio A/E).
+- **Tilted or curved band** the residual mean varies with the prediction
+  level. That is *not* fixable by rescaling: the model's *shape* is wrong.
+  Typical culprits are a misspecified link, a missing nonlinear term, or
+  an interaction the model never saw. Re-fit with the missing structure,
+  do not just rescale.
+- **Funnel shape (spread grows with the predicted mean)** expected for
+  Poisson-Gamma-Tweedie variance, so widening alone is not a defect. The
+  *level of the centre* still has to be checked; the *shape of the spread*
+  does not have to be symmetric in this scale.
+- **Discrete stripes, edges, or off-diagonal structure** suggests an
+  unsaturated feature, a categorical split the model smoothed away
+  (GLUM), or a few dominant leaves (LightGBM). Compare the GLUM and
+  LightGBM panels: structure the GLUM panel smooths but the LightGBM
+  panel preserves points to that a structural rather than purely
+  distributional story is the more likely diagnosis.
+- **Heavy negative stripe at low predictions**: the model prices the
+  safest policies above their outcomes (over-pricing at the bottom of the
+  ranking); check whether this is a structural feature or a cap/zeroing
+  artefact at the observed=0 band.
+
+```{python}
+hexbin_grid(
+    {
+        name: (prediction, y_test - prediction)
+        for name, prediction in pure_premium_predictions.items()
+    },
+    "Predicted pure premium",
+    "Residual (observed - predicted)",
+    reference="zero",
+    extent_mode="residual",
+)
+```
+
+### Log-ratio vs predicted, log axis
+
+The multiplicative residual `log(observed / predicted)` among claim-bearing
+policies is the residual viewed on the observed-value scale: symmetric
+around zero means multiplicative calibration, and the spread shows how much
+a single policy's outcome can deviate from its price. Restricting to
+observed > 0 means the view describes *severity* errors on the money side,
+not frequency errors; the linear residual panel above is the diagnostic for
+those.
+
+**What to look for:**
+
+- **Median around 0 at every predicted level**: multiplicative
+  calibration holds across the predicted range. A flat vertical offset
+  is again a single recalibration factor; a *level-dependent* offset
+  is not.
+- **Tilt or curvature across the predicted range**: the model's
+  *shape* is wrong on the severity side. A global A/E rescale will not
+  fix it. Likely causes: an unsmoothed categorical interaction the
+  Tweedie objective cannot reach, a cap (the data cap, not the model)
+  clipping observed values below the prediction in the upper tail, or a
+  missing severity covariate.
+- **Heavy right tail**: expected (single-policy severity is noisy).
+  Judge the centre, not the tails; the median band matters more than the
+  whiskers.
+- **Left tail at low predictions**: claim rows where `observed << prediction`
+  (negative log-ratio). Often the same low-prediction stripe as the linear
+  residual panel: small losses are over-predicted, sometimes because
+  `ClaimNb=1, ClaimAmountCapped=1` policies get a near-zero observation
+  against a non-trivial prediction. Worth segmenting by claim size before
+  deciding it is a model defect.
+- **Comparing GLUM vs LightGBM**: if the LightGBM panel is symmetric
+  around zero where the GLUM panel is tilted, the LightGBM model captures
+  a non-linearity the GLUM lacks; if both are tilted the same way, the
+  missing structure is in the features, not the model class.
+
+```{python}
+hexbin_grid(
+    {
+        name: (
+            prediction[claims],
+            np.log(y_test[claims] / prediction[claims]),
+        )
+        for name, prediction in pure_premium_predictions.items()
+    },
+    "Predicted pure premium (log scale)",
+    "log(observed / predicted)",
+    logx=True,
+    reference="zero",
+)
+```
+
 ## How to read and interpret
 
-The chapter has produced four pieces of evidence for each of the four final
-pure-premium models: accuracy (deviance and D2), portfolio calibration (A/E),
-ranking (Lorenz curves and Gini), and both single- and double-lift. This
-section says what to look for in each.
+The chapter has produced five pieces of evidence for each of the four final
+pure-premium models: accuracy (deviance and D2), calibration (portfolio A/E,
+by driver age, and by decile), ranking (Lorenz curves and Gini), single- and
+double-lift, and the full prediction distribution (hexbin plots). This
+section says what to look for in each. Select a model only when all of them
+agree, and record the locked test result before recalibrating or deploying.
 
 ### What each score is telling you
 
-- **Gini** — measures **ranking ability only**, not accuracy. A monotonic
+- **Gini**: measures **ranking ability only**, not accuracy. A monotonic
   increasing transformation of the predictions leaves the Gini unchanged,
   because the rank order is unchanged. Two models with the same Gini can
   charge very different totals.
@@ -828,43 +1095,64 @@ section says what to look for in each.
   )
   ```
 
-- **Weighted deviance** — the **proper score** matched to the response
+- **Weighted deviance**: the **proper score** matched to the response
   distribution (Poisson for frequency, Gamma for severity, Tweedie for pure
   premium). Smaller is better; one unit does not translate directly to euros.
   When the true distribution differs from the assumed, deviance is a *proxy*
   for accuracy, not a measurement of it.
-- **D2** — $1 - \mathrm{deviance} / \mathrm{null\_deviance}$, the
+- **D2**: $1 - \mathrm{deviance} / \mathrm{null\_deviance}$, the
   explained-deviance share against the weighted-mean null. Higher is better.
   **D2 is only comparable between models of the same response and same
   family**; a frequency D2 cannot be ranked against a severity D2.
-- **A/E (actual / expected)** — $\sum_i w_i y_i / \sum_i w_i \hat p_i$.
+- **A/E (actual / expected)**: $\sum_i w_i y_i / \sum_i w_i \hat p_i$.
   A/E near 1 is *necessary but not sufficient*: a portfolio can hit 1.0
   with offsetting biases that cancel across segments. Always segment-check.
 
 ### What each chart is telling you
 
-- **Calibration by driver age** — the predicted lines should sit close to the
+- **Calibration by driver age**: the predicted lines should sit close to the
   observed line. A bowed observed line without a matching predicted line is
   *systematic miscalibration* by segment (not bad ranking, but bad pricing).
-- **Lorenz curve** — the area between the diagonal and the curve is the Gini.
-  A curve **dominates only when it does not cross**; crossing curves are not
-  a ranking win. Good models bow the curve below the diagonal; the diagonal
-  itself is random ranking.
-- **Lift chart** — observed and predicted per decile. The two should track
+- **Lift chart**: observed and predicted per decile. The two should track
   on absolute level (calibration) and the observed should rise with the
   decile (ranking). **Crossing** signals that the model over-estimates in
   some deciles and under-estimates in others. The decile *range* is the
   rank-quality part; the *gap* between observed and predicted is the
   calibration part.
-- **Double-lift chart** — orders policies by the A/B ratio and looks at
+- **Lorenz curve**: the area between the diagonal and the curve is the Gini.
+  A curve **dominates only when it does not cross**; crossing curves are not
+  a ranking win. Good models bow the curve below the diagonal; the diagonal
+  itself is random ranking.
+- **Double-lift chart**: orders policies by the A/B ratio and looks at
   observed rates across ratio deciles. **Rising observed across deciles
   favours A**; falling favours B. Flat, noisy, or crossing evidence is
   inconclusive. The middle deciles carry the most diagnostic signal; the
   endpoints are anchored by construction.
+- **Hexbin plots**: predicted vs observed on linear axes shows the bulk
+  plus the claim-free band at observed = 0 (the linear view is clipped to
+  the predicted-value span, so observed outliers extend beyond it; the
+  log-log panel below shows the tail). The log-log view (claim rows only)
+  asks whether the model tracks the observed tail.
+
+  In the **residual** panel, a band centred on zero across the predicted
+  range is unbiased (flat vertical shift = single A/E rescale; tilted or
+  curved band = uncaptured trend, the model's *shape* is wrong and a
+  global rescale will not fix it, refit with the missing structure).
+  Funnel-shape spread alone is expected for Poisson-Gamma-Tweedie
+  variance and is not a defect. Visible stripes, edges, or structure
+  hint at an unsaturated feature; compare GLUM (smoother) against
+  LightGBM to tell a structural story from a distributional one.
+
+  In the **log-ratio** panel (claim rows, severity only), a centre around
+  0 at every predicted level is multiplicative calibration; a
+  level-dependent offset or curvature is again a shape problem, not a
+  rescaling problem. Heavy right tail is expected; judge the centre, not
+  the tails. The view excludes claim-free policies so it cannot diagnose
+  frequency errors on its own.
 
 ### What a good model looks like for this problem
 
-Apply the five-line checklist to the four tables you just printed:
+Apply the checklist to the tables and charts you just printed:
 
 - *Accuracy*: deviance and D2 are smaller and larger than the GLUM
   benchmark within the same family.
@@ -874,6 +1162,8 @@ Apply the five-line checklist to the four tables you just printed:
   crossing; monotonic invariance verified on a re-prediction.
 - *Lift*: observed per-decile tracks predicted in level; range is large;
   no crossings of observed and predicted.
+- *Distribution*: hexbins concentrate along the identity line on both
+  scales; residual bands symmetric around zero across the predicted range.
 - *Business*: relativities make sense, fairness check passes, model is
   stable when re-fit on a resample.
 
@@ -883,6 +1173,6 @@ Load audited claims with a documented cap, split off an untouched test set,
 select every hyperparameter (Tweedie power, GLUM regularization, LightGBM
 grid) on the development split, fit the same protocol on two model families
 (GLUM and LightGBM), produce four final pure-premium estimates, then apply
-the four checks above to the *same* test set and weigh them jointly. No
+the checks above to the *same* test set and weigh them jointly. No
 single number makes a pricing decision; the verdict is the agreement of
-accuracy, calibration, ranking, and business constraints.
+accuracy, calibration, ranking, distribution, and business constraints.
