@@ -30,6 +30,7 @@ from nonlife_pureprem.pure_premium import (
     target_and_weight,
     target_weight_table,
     weighted_mean_deviance,
+    hexbin_grid,
 )
 
 __all__ = [
@@ -62,4 +63,5 @@ __all__ = [
     "target_and_weight",
     "target_weight_table",
     "weighted_mean_deviance",
+    "hexbin_grid",
 ]

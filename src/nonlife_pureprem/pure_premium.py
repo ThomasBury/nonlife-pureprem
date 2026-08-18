@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import lightgbm as lgb
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -957,6 +958,65 @@ def save_core_figures(
         fig.tight_layout()
         fig.savefig(output_dir / "pure_premium_double_lift.png", dpi=150)
         plt.close(fig)
+
+
+def hexbin_grid(
+    xy_by_model, xlabel, ylabel, logx=False, logy=False, reference="diag",
+    extent_mode="auto",
+):
+    """Draw one hexbin panel per model on a shared log-count colour scale.
+
+    ``extent_mode`` clips hexbinning (and the axis limits) to the predicted-value
+    span when the panel is linear:
+    - ``"diag"`` uses ``(xmin, xmax)`` on both axes (predicted vs observed).
+    - ``"residual"`` uses ``(xmin, xmax)`` on x and the symmetric predicted span
+      on y (residual panel).
+    - ``"auto"`` leaves hexbinning and limits alone (log panels).
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    artists = []
+    for axis, (name, (x, y)) in zip(axes.flat, xy_by_model.items()):
+        xlo, xhi = float(x.min()), float(x.max())
+        if extent_mode == "diag" and not logx and not logy:
+            ylo, yhi = xlo, xhi
+            extent = (xlo, xhi, ylo, yhi)
+        elif extent_mode == "residual" and not logx and not logy:
+            span = xhi - xlo
+            extent = (xlo, xhi, -span, span)
+        else:
+            extent = None
+        hb = axis.hexbin(
+            x,
+            y,
+            gridsize=40,
+            mincnt=1,
+            cmap="cividis",
+            linewidths=0.2,
+            xscale="log" if logx else "linear",
+            yscale="log" if logy else "linear",
+            extent=extent,
+        )
+        artists.append(hb)
+        axis.set_title(name)
+        axis.set_xlabel(xlabel)
+        axis.set_ylabel(ylabel)
+        if reference == "diag":
+            if extent is not None:
+                ref_lo, ref_hi = max(xlo, extent[2]), min(xhi, extent[3])
+            else:
+                ref_lo, ref_hi = min(x.min(), y.min()), max(x.max(), y.max())
+            axis.plot([ref_lo, ref_hi], [ref_lo, ref_hi], ":", color="grey")
+        elif reference == "zero":
+            axis.axhline(0.0, ls=":", color="grey")
+        if extent is not None:
+            axis.set_xlim(extent[0], extent[1])
+            axis.set_ylim(extent[2], extent[3])
+    vmax = max(float(artist.get_array().max()) for artist in artists)
+    for artist in artists:
+        artist.set_norm(mcolors.LogNorm(1.0, vmax))
+    colorbar = fig.colorbar(artists[0], ax=axes, fraction=0.03)
+    colorbar.set_label("policies per bin")
+    plt.show()
 
 
 def print_frame(title: str, frame: pd.DataFrame) -> None:
