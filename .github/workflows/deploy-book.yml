@@ -21,12 +21,12 @@ jobs:
       - uses: quarto-dev/quarto-actions/setup@v2
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.12"
           enable-cache: true
-      - name: Install Jupyter kernel
+      - name: Sync project environment
         run: |
-          uv pip install --system --break-system-packages jupyter ipykernel
-          python -m ipykernel install --user --name=python3 --display-name="Python 3"
+          uv sync --locked
+          uv run python -m ipykernel install --user --name=python3 --display-name="Python 3"
+          echo "QUARTO_PYTHON=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
       - run: quarto render book
       - uses: actions/upload-pages-artifact@v4
         with:
