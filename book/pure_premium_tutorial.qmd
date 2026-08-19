@@ -1385,3 +1385,32 @@ grid) on the development split, fit the same protocol on two model families
 the checks above to the *same* test set and weigh them jointly. No
 single number makes a pricing decision; the verdict is the agreement of
 accuracy, calibration, ranking, distribution, and business constraints.
+
+::: {.callout-note}
+## Where to go next: re-think the loss family
+
+Throughout this chapter the loss families are fixed: Poisson for frequency,
+Gamma for severity, Tweedie for pure premium. They are the standard actuarial
+defaults and they keep the tutorial tractable, but they are not the only
+choices. Two natural extensions, one per component, are:
+
+- **Negative-binomial** for frequency: handles overdispersion explicitly
+  ($E[N] = \lambda, \mathrm{Var}[N] = \lambda + \alpha \lambda^2$); a small
+  $\alpha$ selection step mirrors `select_tweedie_power` on the development
+  split. The expected gain over Poisson is usually small, because Poisson
+  coefficients stay consistent under overdispersion and the inference GLUM
+  already uses robust standard errors.
+- **Inverse-Gaussian** for severity: variance $\mu^3$ instead of $\mu^2$,
+  i.e. a heavier right tail than Gamma; useful when the empirical severity
+  CCDF panel above sits visibly above the Gamma fit on the log-log view.
+
+Both are one-line family swaps for glum; for LightGBM both need a short
+custom objective that returns the gradient and Hessian of the chosen
+log-likelihood, with weights taken from `dataset.get_weight()`. The
+trade-off is real: every extra family doubles the number of pure-premium
+combinations and the number of cells in the double-lift tables, and the
+adjudication questions (which family wins on *this* dataset) tend to be
+settled empirically with the same accuracy and ranking scores already used
+here. Worth doing on a fully solved production problem; not worth doing
+on first contact with the modelling task.
+:::
