@@ -31,6 +31,7 @@ from typing import Any, NamedTuple
 import lightgbm as lgb
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 from glum import (
@@ -40,6 +41,8 @@ from glum import (
 )
 from rich.console import Console
 from rich.table import Table
+from scipy.optimize import curve_fit, minimize_scalar
+from scipy.stats import gamma, poisson
 from sklearn.datasets import fetch_openml
 from sklearn.metrics import (
     mean_gamma_deviance,
@@ -58,6 +61,13 @@ NUM_BOOST_ROUND = 2_000
 EARLY_STOPPING_ROUNDS = 50
 TWEEDIE_POWERS = tuple(float(p) for p in np.arange(1.1, 2.0, 0.1).round(1))
 CONSOLE = Console()
+
+# Okabe-Ito palette shared by every diagnostic plot. These mirror the
+# tutorial's MODEL_COLORS ("observed" → black, "GLUM" → orange) so the
+# library charts stay visually consistent without needing to pass colors
+# through every helper.
+_EMPIRICAL_COLOR = "#000000"
+_FIT_COLOR = "#E69F00"
 
 CATEGORICAL_FEATURES = ["VehBrand", "VehPower", "VehGas", "Region", "Area"]
 LIGHTGBM_FEATURES = [
@@ -117,8 +127,17 @@ def prepare_mtpl_data(
     frequency: pd.DataFrame,
     severity: pd.DataFrame,
     claim_cap: float = CLAIM_CAP,
-) -> tuple[pd.DataFrame, dict[str, int | float]]:
-    """Validate source data, cap individual claims, aggregate, and derive targets."""
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int | float]]:
+    """Validate source data, cap individual claims, aggregate, and derive targets.
+
+    Returns ``(policies, claims, report)``:
+
+    - ``policies`` is one row per policy with the audit-ready targets
+      (``Frequency``, ``Severity``, ``PurePremium``).
+    - ``claims`` is one row per individual claim with the raw and capped
+      amounts; it is what uncapped empirical CCDFs use to show the true tail.
+    - ``report`` is the audit dict used by the tutorial's preparation table.
+    """
     required_frequency = {"IDpol", "ClaimNb", "Exposure", "Density"}
     required_severity = {"IDpol", "ClaimAmount"}
     missing_frequency = required_frequency.difference(frequency.columns)
@@ -161,6 +180,9 @@ def prepare_mtpl_data(
     claims = claims.loc[amounts > 0].copy()
     claims["ClaimAmount"] = amounts[amounts > 0]
     claims["ClaimAmountCapped"] = claims["ClaimAmount"].clip(upper=claim_cap)
+    per_claim = claims[["IDpol", "ClaimAmount", "ClaimAmountCapped"]].reset_index(
+        drop=True
+    )
 
     aggregated = claims.groupby("IDpol").agg(
         ClaimNb=("ClaimAmount", "size"),
@@ -204,14 +226,18 @@ def prepare_mtpl_data(
             else 0.0
         ),
     }
-    return policies, report
+    return policies, per_claim, report
 
 
 def load_mtpl2(
     n_samples: int | None = None,
     random_state: int = RANDOM_STATE,
-) -> tuple[pd.DataFrame, dict[str, int | float]]:
-    """Fetch freMTPL2 frequency/severity data and prepare a reproducible sample."""
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int | float]]:
+    """Fetch freMTPL2 frequency/severity data and prepare a reproducible sample.
+
+    Returns ``(data, claims, audit)``; see :func:`prepare_mtpl_data` for what
+    ``data`` (per-policy) and ``claims`` (per-claim, uncapped) hold.
+    """
     frequency = fetch_openml(data_id=41214, as_frame=True).data
     severity = fetch_openml(data_id=41215, as_frame=True).data
     if n_samples is not None:
@@ -256,6 +282,623 @@ def target_and_weight(
         rows[spec.target].to_numpy(dtype=float),
         rows[spec.weight].to_numpy(dtype=float),
     )
+
+
+def weighted_empirical_cdf(
+    values: np.ndarray, weights: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted ``values`` and their weighted empirical CDF."""
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    if np.any(weights <= 0) or weights.sum() <= 0:
+        raise ValueError("weights must be positive")
+    order = np.argsort(values, kind="stable")
+    return values[order], np.cumsum(weights[order]) / weights.sum()
+
+
+def weighted_empirical_ccdf(
+    values: np.ndarray, weights: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted ``values`` and their weighted empirical CCDF (1 − F̂)."""
+    sorted_x, cdf = weighted_empirical_cdf(values, weights)
+    return sorted_x, 1.0 - cdf
+
+
+def _cdf_diagnostic_axes(
+    axes: tuple[plt.Axes, plt.Axes] | None, figsize: tuple[float, float]
+) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
+    if axes is None:
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+    else:
+        fig = axes[0].figure
+    return fig, axes
+
+
+def _single_panel_axes(
+    axes: plt.Axes | None, figsize: tuple[float, float]
+) -> tuple[plt.Figure, plt.Axes]:
+    if axes is None:
+        fig, axes = plt.subplots(figsize=figsize)
+    else:
+        fig = axes.figure
+    return fig, axes
+
+
+def _set_integer_xaxis(axis: plt.Axes, x_max: int) -> None:
+    """Place ticks at integer positions on a discrete-support axis."""
+    axis.xaxis.set_major_locator(mticker.MaxNLocator(integer=True, steps=[1, 2, 5, 10]))
+    axis.set_xlim(left=-0.5, right=x_max + 1.5)
+
+
+def _set_log_y_observed_floor(
+    axis: plt.Axes, empirical_min: float, factor: float = 100.0
+) -> None:
+    """Pin the log-y lower bound to the smallest observed probability.
+
+    The fitted line can drop far below the empirical when the family is too
+    light-tailed for the data; pinning the bound to the empirical minimum
+    keeps the tail visible. ``factor`` defaults to two decades of headroom
+    below the smallest observed probability.
+    """
+    if empirical_min > 0:
+        axis.set_ylim(bottom=float(empirical_min) / factor)
+
+
+def _fit_tweedie_mle(
+    y: np.ndarray,
+    tweedie_power: float,
+    sample_weight: np.ndarray | None = None,
+) -> tuple[float, float]:
+    """Estimate (μ̂, φ̂) by profile maximum likelihood at a fixed power.
+
+    Profile MLE: scan over μ on the log scale; at each μ solve φ from Pearson
+    residuals via ``TweedieDistribution.dispersion``; evaluate glum's series
+    Tweedie log-likelihood at (μ, φ(μ)); pick the μ that maximizes it. φ̂ is
+    re-evaluated at μ̂ for the return value. This is the standard GLM recipe
+    and matches what ``select_tweedie_power`` does internally, so the
+    diagnostic uses the same fit as the rest of the tutorial.
+
+    Falls back to the moment-based estimator (μ̂ = weighted mean,
+    φ̂ = Var / μ̂^p) when the optimizer cannot return a finite value (all-zero
+    data, non-finite μ_init, etc.) so an exotic dataset cannot break the
+    diagnostic.
+    """
+    family = TweedieDistribution(tweedie_power)
+    y_arr = np.asarray(y, dtype=float)
+    w_arr = (
+        np.asarray(sample_weight, dtype=float)
+        if sample_weight is not None
+        else np.ones_like(y_arr)
+    )
+    mu_init = float((y_arr * w_arr).sum() / w_arr.sum())
+
+    def moment_fallback() -> tuple[float, float]:
+        variance = float(((y_arr - mu_init) ** 2 * w_arr).sum() / w_arr.sum())
+        phi = variance / mu_init**tweedie_power if mu_init > 0 else float("nan")
+        return mu_init, phi
+
+    if mu_init <= 0:
+        return moment_fallback()
+
+    def neg_log_likelihood(log_mu: float) -> float:
+        mu = float(np.exp(log_mu))
+        pred = np.full_like(y_arr, mu)
+        phi = family.dispersion(y=y_arr, mu=pred, sample_weight=w_arr, ddof=0)
+        return -family.log_likelihood(
+            y=y_arr, mu=pred, sample_weight=w_arr, dispersion=phi
+        )
+
+    try:
+        result = minimize_scalar(
+            neg_log_likelihood,
+            bracket=(
+                np.log(mu_init * 0.5),
+                np.log(mu_init),
+                np.log(mu_init * 2.0),
+            ),
+        )
+    except ValueError:
+        return moment_fallback()
+    mu_hat = float(np.exp(result.x))
+    if not np.isfinite(mu_hat):
+        return moment_fallback()
+    phi_hat = float(
+        family.dispersion(
+            y=y_arr,
+            mu=np.full_like(y_arr, mu_hat),
+            sample_weight=w_arr,
+            ddof=0,
+        )
+    )
+    if not np.isfinite(phi_hat):
+        return moment_fallback()
+    return mu_hat, phi_hat
+
+
+def _set_upper_x_bound(axis: plt.Axes, x_max: float) -> None:
+    """Pin the upper x-axis bound to a quantile-based cap.
+
+    The cap drops the small-mass extreme that would otherwise stretch a log-x
+    axis over multiple decades and squash the bulk.
+    """
+    axis.set_xlim(right=float(x_max))
+
+
+def poisson_cdf_diagnostic(
+    data: pd.DataFrame,
+    axes: tuple[plt.Axes, plt.Axes] | None = None,
+) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
+    """Compare the weighted empirical ClaimNb CDF to Poisson(λ̂) on linear and log-y axes."""
+    fig, axes = _cdf_diagnostic_axes(axes, (11.0, 4.5))
+    lambda_hat = float(data["ClaimNb"].sum() / data["Exposure"].sum())
+    empirical_x, empirical_f = weighted_empirical_cdf(
+        data["ClaimNb"].to_numpy(dtype=float),
+        data["Exposure"].to_numpy(dtype=float),
+    )
+    x_grid = np.arange(int(empirical_x.max()) + 2)
+    theoretical_f = poisson.cdf(x_grid, lambda_hat)
+    x_max = int(empirical_x.max())
+    for axis, log_y in zip(axes, (False, True)):
+        axis.step(
+            empirical_x,
+            empirical_f,
+            where="post",
+            color=_EMPIRICAL_COLOR,
+            label="Empirical",
+        )
+        axis.step(
+            x_grid,
+            theoretical_f,
+            where="post",
+            color=_FIT_COLOR,
+            label=f"Poisson(λ={lambda_hat:.4f})",
+        )
+        axis.set_xlabel("ClaimNb")
+        axis.set_ylabel("CDF")
+        axis.set_title("Claim count" + (" (log-y)" if log_y else " (linear)"))
+        if log_y:
+            axis.set_yscale("log")
+            _set_log_y_observed_floor(axis, empirical_f.min())
+        _set_integer_xaxis(axis, x_max)
+        axis.legend()
+    fig.tight_layout()
+    return fig, axes
+
+
+def poisson_ccdf_diagnostic(
+    data: pd.DataFrame,
+    axes: plt.Axes | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Compare the weighted empirical ClaimNb CCDF to Poisson sf(λ̂) on a log-y axis."""
+    fig, axis = _single_panel_axes(axes, (6.5, 4.5))
+    lambda_hat = float(data["ClaimNb"].sum() / data["Exposure"].sum())
+    empirical_x, empirical_s = weighted_empirical_ccdf(
+        data["ClaimNb"].to_numpy(dtype=float),
+        data["Exposure"].to_numpy(dtype=float),
+    )
+    x_grid = np.arange(int(empirical_x.max()) + 2)
+    theoretical_s = poisson.sf(x_grid, lambda_hat)
+    axis.step(
+        empirical_x,
+        empirical_s,
+        where="post",
+        color=_EMPIRICAL_COLOR,
+        label="Empirical",
+    )
+    axis.step(
+        x_grid,
+        theoretical_s,
+        where="post",
+        color=_FIT_COLOR,
+        label=f"Poisson(λ={lambda_hat:.4f})",
+    )
+    axis.set_yscale("log")
+    _set_log_y_observed_floor(axis, empirical_s.min())
+    axis.set_xlabel("ClaimNb")
+    axis.set_ylabel("CCDF (log-y)")
+    axis.set_title("Claim count right tail (log-y CCDF)")
+    _set_integer_xaxis(axis, int(empirical_x.max()))
+    axis.legend()
+    fig.tight_layout()
+    return fig, axis
+
+
+def gamma_cdf_diagnostic(
+    data: pd.DataFrame,
+    axes: tuple[plt.Axes, plt.Axes] | None = None,
+) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
+    """Compare the weighted empirical Severity CDF to Gamma(α̂, β̂) MLE on linear and log-log axes."""
+    fig, axes = _cdf_diagnostic_axes(axes, (11.0, 4.5))
+    claims = data.loc[data["ClaimNb"] > 0]
+    severity = claims["Severity"].to_numpy(dtype=float)
+    weights = claims["ClaimNb"].to_numpy(dtype=float)
+    alpha, _, beta = gamma.fit(severity, floc=0)
+    empirical_x, empirical_f = weighted_empirical_cdf(severity, weights)
+    x_grid = np.geomspace(max(severity.min(), 1.0), empirical_x.max() * 1.5, 400)
+    theoretical_f = gamma.cdf(x_grid, alpha, scale=beta)
+    for axis, log_axes in zip(axes, (False, True)):
+        axis.step(
+            empirical_x,
+            empirical_f,
+            where="post",
+            color=_EMPIRICAL_COLOR,
+            label="Empirical",
+        )
+        axis.plot(
+            x_grid,
+            theoretical_f,
+            color=_FIT_COLOR,
+            label=f"Gamma(α={alpha:.3f}, β={beta:.0f})",
+        )
+        axis.set_xlabel("Severity (EUR)")
+        axis.set_ylabel("CDF")
+        if log_axes:
+            axis.set_xscale("log")
+            axis.set_yscale("log")
+            _set_log_y_observed_floor(axis, empirical_f.min())
+            axis.set_title("Severity (log-log)")
+        else:
+            axis.set_title("Severity (linear)")
+        axis.legend()
+    fig.tight_layout()
+    return fig, axes
+
+
+def gamma_ccdf_diagnostic(
+    data: pd.DataFrame,
+    claims: pd.DataFrame | None = None,
+    axes: plt.Axes | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Compare the empirical severity CCDF to Gamma sf(α̂, β̂) on log-log axes.
+
+    When ``claims`` (the per-claim DataFrame from :func:`prepare_mtpl_data`) is
+    supplied, the empirical and the Gamma fit both switch to per-claim
+    uncapped ``ClaimAmount`` so the cap at ``CLAIM_CAP`` does not flatten the
+    tail in the diagnostic. With ``claims=None`` the function falls back to
+    the per-policy ``Severity`` (capped, claim-weighted) — kept for back
+    compatibility and for callers that do not have per-claim data.
+
+    The x-axis is capped at the empirical 99.5th percentile so the single
+    most expensive claim does not stretch the panel over multiple decades
+    and squash the bulk; the fitted Gamma line is drawn only up to the
+    same cap so both lines share the visible x-range.
+    """
+    fig, axis = _single_panel_axes(axes, (6.5, 4.5))
+    if claims is not None:
+        severity = claims["ClaimAmount"].to_numpy(dtype=float)
+        weights = np.ones_like(severity)
+        empirical_label = "Empirical (uncapped per-claim)"
+    else:
+        claim_rows = data.loc[data["ClaimNb"] > 0]
+        severity = claim_rows["Severity"].to_numpy(dtype=float)
+        weights = claim_rows["ClaimNb"].to_numpy(dtype=float)
+        empirical_label = "Empirical (per-policy avg, capped)"
+    alpha, _, beta = gamma.fit(severity, floc=0)
+    upper = float(np.quantile(severity, 0.995, weights=weights, method="inverted_cdf"))
+    empirical_x, empirical_s = weighted_empirical_ccdf(severity, weights)
+    within = empirical_x <= upper
+    empirical_x = empirical_x[within]
+    empirical_s = empirical_s[within]
+    x_grid = np.geomspace(max(severity.min(), 1.0), upper, 400)
+    theoretical_s = gamma.sf(x_grid, alpha, scale=beta)
+    axis.step(
+        empirical_x,
+        empirical_s,
+        where="post",
+        color=_EMPIRICAL_COLOR,
+        label=empirical_label,
+    )
+    axis.plot(
+        x_grid,
+        theoretical_s,
+        color=_FIT_COLOR,
+        label=f"Gamma(α={alpha:.3f}, β={beta:.0f})",
+    )
+    axis.set_xscale("log")
+    axis.set_yscale("log")
+    _set_log_y_observed_floor(axis, empirical_s.min())
+    _set_upper_x_bound(axis, upper)
+    axis.set_xlabel("Severity (EUR, log scale)")
+    axis.set_ylabel("CCDF (log scale)")
+    axis.set_title("Severity right tail (log-log CCDF)")
+    axis.legend()
+    fig.tight_layout()
+    return fig, axis
+
+
+def tweedie_cdf_diagnostic(
+    data: pd.DataFrame,
+    tweedie_power: float,
+    axes: tuple[plt.Axes, plt.Axes] | None = None,
+) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
+    """Compare the weighted empirical per-policy ClaimAmountCapped CDF to Tweedie(p, μ̂, φ̂).
+
+    The fit is profile maximum likelihood: scan over μ on the log scale, with φ
+    solved from Pearson residuals at each μ, and pick the μ that maximizes
+    glum's series-based Tweedie log-likelihood. φ̂ is re-evaluated at μ̂ for
+    the legend; matches what ``select_tweedie_power`` does internally so the
+    diagnostic is consistent with the rest of the tutorial. Falls back to
+    the moment-based estimator when MLE cannot return finite values.
+
+    The Tweedie CDF is computed by truncating the Poisson-Gamma series
+    (the standard actuarial approach; ``scipy.stats.tweedie`` is not exposed in
+    the locked scipy build).
+    """
+    fig, axes = _cdf_diagnostic_axes(axes, (11.0, 4.5))
+    amounts = data["ClaimAmountCapped"].to_numpy(dtype=float)
+    weights = data["Exposure"].to_numpy(dtype=float)
+    mu, phi = _fit_tweedie_mle(amounts, tweedie_power, weights)
+    empirical_x, empirical_f = weighted_empirical_cdf(amounts, weights)
+    x_grid = np.linspace(0.0, max(amounts.max(), 1.0), 400)
+    theoretical_f = tweedie_cdf_series(x_grid, mu, phi, tweedie_power)
+    for axis, log_y in zip(axes, (False, True)):
+        axis.step(
+            empirical_x,
+            empirical_f,
+            where="post",
+            color=_EMPIRICAL_COLOR,
+            label="Empirical",
+        )
+        axis.plot(
+            x_grid,
+            theoretical_f,
+            color=_FIT_COLOR,
+            label=f"Tweedie(p={tweedie_power:.1f}, μ={mu:.2f}, φ={phi:.2f})",
+        )
+        axis.set_xlabel("ClaimAmountCapped (EUR)")
+        axis.set_ylabel("CDF")
+        axis.set_title("Pure premium" + (" (log-y)" if log_y else " (linear)"))
+        if log_y:
+            axis.set_yscale("log")
+            _set_log_y_observed_floor(axis, empirical_f.min(), factor=10.0)
+        axis.legend()
+    fig.tight_layout()
+    return fig, axes
+
+
+def tweedie_ccdf_diagnostic(
+    data: pd.DataFrame,
+    tweedie_power: float,
+    axes: plt.Axes | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Compare the weighted empirical per-policy CCDF to 1 − Tweedie(p, μ̂, φ̂) on log-log axes.
+
+    The empirical uses ``ClaimAmountOriginal`` (per-policy uncapped aggregate,
+    exposure-weighted) rather than ``ClaimAmountCapped`` so the cap at
+    ``CLAIM_CAP`` does not flatten the tail in the diagnostic. The x-axis is
+    cropped to the positive support (1st positive percentile and 99.5th
+    percentile of the positive empirical mass) so log-x succeeds and the
+    small-mass extreme does not stretch the panel; the zero-mass step the
+    linear CDF panel documents is dropped here. The (μ̂, φ̂) fit is profile MLE
+    (see :func:`tweedie_cdf_diagnostic` for details); the log-y lower bound
+    uses one decade of headroom instead of two because the Tweedie CCDF decays
+    faster than the Gamma one on this data and the extra empty space below
+    doesn't carry diagnostic signal.
+    """
+    fig, axis = _single_panel_axes(axes, (6.5, 4.5))
+    amounts = data["ClaimAmountOriginal"].to_numpy(dtype=float)
+    weights = data["Exposure"].to_numpy(dtype=float)
+    mu, phi = _fit_tweedie_mle(amounts, tweedie_power, weights)
+    positive = amounts > 0
+    positive_x = amounts[positive]
+    positive_w = weights[positive]
+    quantiles = np.quantile(
+        positive_x, [0.01, 0.995], weights=positive_w, method="inverted_cdf"
+    )
+    lower, upper = float(quantiles[0]), float(quantiles[1])
+    empirical_x, empirical_s = weighted_empirical_ccdf(amounts, weights)
+    within = (empirical_x >= lower) & (empirical_x <= upper)
+    empirical_x = empirical_x[within]
+    empirical_s = empirical_s[within]
+    x_grid = np.geomspace(lower, upper, 400)
+    theoretical_s = tweedie_sf_series(x_grid, mu, phi, tweedie_power)
+    axis.step(
+        empirical_x,
+        empirical_s,
+        where="post",
+        color=_EMPIRICAL_COLOR,
+        label="Empirical (per-policy uncapped)",
+    )
+    axis.plot(
+        x_grid,
+        theoretical_s,
+        color=_FIT_COLOR,
+        label=f"Tweedie(p={tweedie_power:.1f}, μ={mu:.2f}, φ={phi:.2f})",
+    )
+    axis.set_xscale("log")
+    axis.set_yscale("log")
+    _set_log_y_observed_floor(axis, empirical_s.min(), factor=10.0)
+    _set_upper_x_bound(axis, upper)
+    axis.set_xlabel("ClaimAmountOriginal (EUR, log scale)")
+    axis.set_ylabel("CCDF (log scale)")
+    axis.set_title("Pure premium right tail (log-log CCDF)")
+    axis.legend()
+    fig.tight_layout()
+    return fig, axis
+
+
+def tweedie_cdf_series(
+    x: np.ndarray,
+    mu: float,
+    phi: float,
+    tweedie_power: float,
+    max_terms: int = 200,
+    tol: float = 1e-10,
+) -> np.ndarray:
+    """Compute the compound Poisson-Gamma Tweedie CDF by truncating its series.
+
+    For ``1 < p < 2`` the Tweedie compound distribution has the series form
+
+    .. math::
+
+        F(y) = e^{-\\lambda} \\sum_{k=0}^{\\infty}
+            \\frac{\\lambda^k}{k!} G(y; k\\alpha, \\beta),
+
+    with ``alpha = (2-p)/(p-1)``, ``beta = phi * (p-1) * mu ** (p-1)`` and
+    ``lambda = mu ** (2-p) / (phi * (2-p))``. The Poisson weights decay
+    geometrically past ``k = lambda`` so the series converges in a few dozen
+    terms for typical actuarial data; we stop when the largest per-term
+    contribution drops below ``tol``.
+    """
+    if not (1 < tweedie_power < 2):
+        raise ValueError("tweedie_power must lie in (1, 2)")
+    if mu <= 0 or phi <= 0:
+        raise ValueError("mu and phi must be positive")
+    alpha = (2 - tweedie_power) / (tweedie_power - 1)
+    beta = phi * (tweedie_power - 1) * mu ** (tweedie_power - 1)
+    lam = mu ** (2 - tweedie_power) / (phi * (2 - tweedie_power))
+    zero_mass = float(np.exp(-lam))
+    x_arr = np.atleast_1d(np.asarray(x, dtype=float))
+    result = np.where(x_arr <= 0, 0.0, zero_mass)
+    positive = x_arr > 0
+    if not np.any(positive):
+        return result
+    poisson_term = zero_mass
+    for k in range(1, max_terms + 1):
+        poisson_term *= lam / k
+        contribution = poisson_term * gamma.cdf(
+            np.maximum(x_arr[positive], 1e-300), a=k * alpha, scale=beta
+        )
+        result = result.copy()
+        result[positive] += contribution
+        if float(np.max(contribution)) < tol:
+            break
+    return result
+
+
+def tweedie_sf_series(
+    x: np.ndarray,
+    mu: float,
+    phi: float,
+    tweedie_power: float,
+    max_terms: int = 200,
+    tol: float = 1e-10,
+) -> np.ndarray:
+    """Compute the compound Poisson-Gamma Tweedie survival function 1 − F by series truncation.
+
+    Same convergence guarantee as ``tweedie_cdf_series``; computes 1 − F by
+    subtracting ``gamma.cdf`` terms from ``1 − zero_mass``. Mathematically
+    equivalent to summing ``poisson_term · gamma.sf``, kept as ``1 − ...``
+    so the loop shares its structure with ``tweedie_cdf_series``. The trailing
+    ``np.maximum(result, 0.0)`` clamps sub-epsilon cancellation noise.
+    """
+    if not (1 < tweedie_power < 2):
+        raise ValueError("tweedie_power must lie in (1, 2)")
+    if mu <= 0 or phi <= 0:
+        raise ValueError("mu and phi must be positive")
+    alpha = (2 - tweedie_power) / (tweedie_power - 1)
+    beta = phi * (tweedie_power - 1) * mu ** (tweedie_power - 1)
+    lam = mu ** (2 - tweedie_power) / (phi * (2 - tweedie_power))
+    zero_mass = float(np.exp(-lam))
+    x_arr = np.atleast_1d(np.asarray(x, dtype=float))
+    result = np.where(x_arr <= 0, 1.0, 1.0 - zero_mass)
+    positive = x_arr > 0
+    if not np.any(positive):
+        return result
+    poisson_term = zero_mass
+    for k in range(1, max_terms + 1):
+        poisson_term *= lam / k
+        contribution = poisson_term * gamma.cdf(
+            np.maximum(x_arr[positive], 1e-300), a=k * alpha, scale=beta
+        )
+        result = result.copy()
+        result[positive] -= contribution
+        if float(np.max(contribution)) < tol:
+            break
+    return np.maximum(result, 0.0)
+
+
+_INITIAL_VARIANCE_POWER = {"frequency": 1.0, "severity": 2.0, "pure_premium": 1.5}
+
+
+def mean_variance_table(
+    data: pd.DataFrame, by: str, response: str
+) -> tuple[pd.DataFrame, float, float]:
+    """Group by ``by``, compute the weighted mean and variance of ``response`` per group.
+
+    Returns the per-group table plus the fitted ``(p, φ)`` of the power-law
+    variance function ``Var ≈ φ · mean^p``. The fit uses ``scipy.optimize.curve_fit``
+    starting from the canonical power for the chosen response.
+    """
+    rows, target, weight = target_and_weight(data, response)
+    frame = rows.assign(target=target, weight=weight).rename(columns={by: "_group"})
+    grouped = frame.groupby("_group", observed=True)
+
+    def _aggregate(group: pd.DataFrame) -> pd.Series:
+        weights = group["weight"].to_numpy(dtype=float)
+        target = group["target"].to_numpy(dtype=float)
+        mean = float(np.average(target, weights=weights))
+        variance = float(np.average((target - mean) ** 2, weights=weights))
+        return pd.Series({"n": len(group), "mean": mean, "variance": variance})
+
+    table = grouped.apply(_aggregate, include_groups=False).reset_index()
+    mean_values = table["mean"].to_numpy(dtype=float)
+    variance_values = table["variance"].to_numpy(dtype=float)
+    initial_p = _INITIAL_VARIANCE_POWER[response]
+    initial_phi = (
+        float(np.mean(variance_values) / np.mean(mean_values) ** initial_p)
+        if np.all(mean_values > 0)
+        else 1.0
+    )
+    (p_fit, phi_fit), _ = curve_fit(
+        lambda mean, p, phi: phi * np.maximum(mean, 1e-12) ** p,
+        mean_values,
+        variance_values,
+        p0=[initial_p, initial_phi],
+    )
+    return table, float(p_fit), float(phi_fit)
+
+
+def mean_variance_diagnostic(
+    data: pd.DataFrame,
+    by: str,
+    tweedie_power: float,
+    axes: tuple[plt.Axes, plt.Axes, plt.Axes] | None = None,
+) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes, plt.Axes]]:
+    """Plot empirical (μ, σ²) per group and the fitted power-law variance function.
+
+    The pure-premium panel uses ``tweedie_power`` only as the legend label and the
+    starting point of the curve fit; the fitted ``p`` is what the data says.
+    """
+    responses = ("frequency", "severity", "pure_premium")
+    titles = {
+        "frequency": "Frequency",
+        "severity": "Severity",
+        "pure_premium": "Pure premium",
+    }
+    if axes is None:
+        fig, axes = plt.subplots(1, 3, figsize=(15.0, 4.5))
+    else:
+        fig = axes[0].figure
+    for axis, response in zip(axes, responses):
+        table, p, phi = mean_variance_table(data, by, response)
+        axis.scatter(
+            table["mean"],
+            table["variance"],
+            color="black",
+            label=f"Empirical ({len(table)} groups)",
+        )
+        positive_mean = table["mean"][table["mean"] > 0]
+        x_grid = np.linspace(
+            max(positive_mean.min(), 1e-12),
+            positive_mean.max() * 1.5,
+            100,
+        )
+        axis.plot(
+            x_grid,
+            phi * x_grid**p,
+            "--",
+            label=f"Fit: Var ≈ {phi:.3g} · μ^{p:.2f}",
+        )
+        axis.set_xlabel(f"Mean of {titles[response]}")
+        axis.set_ylabel(f"Variance of {titles[response]}")
+        title = f"{titles[response]} by {by}"
+        if response == "pure_premium":
+            title = f"{title} (Tweedie p = {tweedie_power:.1f})"
+        axis.set_title(title)
+        axis.legend()
+    fig.tight_layout()
+    return fig, axes
 
 
 def glum_family(component: str, tweedie_power: float) -> str | TweedieDistribution:
@@ -961,7 +1604,12 @@ def save_core_figures(
 
 
 def hexbin_grid(
-    xy_by_model, xlabel, ylabel, logx=False, logy=False, reference="diag",
+    xy_by_model,
+    xlabel,
+    ylabel,
+    logx=False,
+    logy=False,
+    reference="diag",
     extent_mode="auto",
 ):
     """Draw one hexbin panel per model on a shared log-count colour scale.
@@ -1053,7 +1701,7 @@ def main(
 ) -> None:
     """Run the complete tutorial; importing this module performs no work."""
     if data is None:
-        data, preparation = load_mtpl2(n_samples=n_samples)
+        data, _, preparation = load_mtpl2(n_samples=n_samples)
     if preparation is None:
         raise ValueError("preparation is required when data is supplied")
     print_frame("Target and weight definitions", target_weight_table())

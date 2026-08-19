@@ -35,6 +35,8 @@ from nonlife_pureprem import (
     fit_glum_inference,
     fit_glum_predictive,
     fit_lightgbm,
+    gamma_cdf_diagnostic,
+    gamma_ccdf_diagnostic,
     gini,
     grouped_calibration,
     lift_diagnostics,
@@ -43,11 +45,19 @@ from nonlife_pureprem import (
     lorenz_curve,
     lorenz_dominance_table,
     make_splits,
+    mean_variance_diagnostic,
+    mean_variance_table,
+    poisson_cdf_diagnostic,
+    poisson_ccdf_diagnostic,
     portfolio_calibration_table,
     print_frame,
     select_tweedie_power,
     target_and_weight,
     target_weight_table,
+    tweedie_cdf_diagnostic,
+    tweedie_ccdf_diagnostic,
+    weighted_empirical_ccdf,
+    weighted_empirical_cdf,
     weighted_mean_deviance,
     hexbin_grid
 )
@@ -112,7 +122,7 @@ and document the cap before fitting, and use exposure for frequency and pure
 premium but claim count for claim-weighted severity.
 
 ```{python}
-data, audit = load_mtpl2(n_samples=n_samples)
+data, claims, audit = load_mtpl2(n_samples=n_samples)
 print_frame("Target and weight definitions", target_weight_table())
 print_frame("Claim preparation", pd.DataFrame([audit]))
 ```
@@ -169,8 +179,120 @@ Key points:
   the `claims_only` flag filters rows to `ClaimNb > 0` so the average is
   the claim-amount weighted mean of the conditional severity.
 - `pure_premium` uses target `PurePremium` with weight `Exposure` over all
-  policies. Multiplying by exposure recovers the total capped claim amount.
+   policies. Multiplying by exposure recovers the total capped claim amount.
 :::
+
+## Validate distributional assumptions
+
+**Why:** every score later in this chapter assumes a family — Poisson for
+frequency, Gamma for severity, Tweedie for pure premium — and each family
+carries a *variance function*: $\mathrm{Var}[N] = E[N]$ for Poisson,
+$\mathrm{Var}[Y] = E[Y]^2 / \alpha$ for Gamma, $\mathrm{Var}[Y] = \phi\,E[Y]^p$
+for Tweedie. Wrong family, wrong deviance, wrong conclusions. Two complementary
+checks answer two complementary questions:
+
+- **CDF checks** ask whether the *shape* of the empirical distribution matches
+  the assumed family, including the heavy right tail (the part a fitted PDF
+  or PMF view flattens out).
+- **Mean-variance checks** ask whether the *variance function* scales the way
+  the family predicts across segments.
+
+**What we do:** for each of the three responses, compare the empirical CDF
+against the fitted family on two scales — linear and a log scale that
+spreads the tail — then fit $\mathrm{Var} = \phi \cdot \mu^p$ across groups
+defined by `Area` and read off the fitted power.
+
+**Best practice:** run these checks on the *full* prepared portfolio before
+any modelling choice; a wrong distributional assumption cannot be repaired by
+better tuning. The Poisson check is the most consequential here: high claim
+counts are rare, so the bulk hides departures from Poisson; the log-y panel is
+where the high-count tail reveals itself.
+
+### Claim count: Poisson assumption
+
+Per-policy `ClaimNb` is a non-negative integer. The empirical CDF is weighted
+by `Exposure` so each policy's jump area is its exposure share. The Poisson
+fit uses $\hat\lambda = \sum_i \mathrm{ClaimNb}_i / \sum_i \mathrm{Exposure}_i$
+(the exposure-weighted MLE rate, identical to the portfolio average
+frequency). On the linear panel the bulk should hug the diagonal; the
+log-y panel is where any high-count tail mass that the Poisson fit
+under-predicts becomes visible as a divergence in the right-hand jumps.
+
+```{python}
+poisson_cdf_diagnostic(data)
+```
+
+What to look for:
+
+- **Linear panel**: the empirical and theoretical steps should overlap
+  closely. Visible jumps where the empirical CDF rises above the theoretical
+  CDF indicate mass the Poisson fit under-predicts at that count.
+- **Log-y panel**: the high-count tail is the story. Empirical probability
+  above the theoretical line at the right tail is excess high-count mass;
+  below is excess zeros. Both are departures from Poisson. The log-y lower
+  bound is pinned to the smallest *observed* probability with two decades of
+  headroom — the fitted Poisson can drop far below the empirical when the
+  real tail is heavier than Poisson, and that gap is the diagnostic.
+
+The log-y CCDF panel zooms in on the right tail: linear x (log-x is
+impossible because `ClaimNb = 0` is common), log-y axis so a slow tail
+decay shows up as the empirical curve flattening above the Poisson `sf`.
+The log-y lower bound is pinned to the smallest *observed* survival
+probability with two decades of headroom.
+
+```{python}
+poisson_ccdf_diagnostic(data)
+```
+
+### Severity: Gamma assumption
+
+`Severity = ClaimAmountCapped / ClaimNb` for policies with at least one claim
+— the same target the GLUM severity model fits, so this is a check on the
+assumed family behind that model. The empirical CDF is weighted by `ClaimNb`
+so each policy's jump area is its share of total claim count. The Gamma fit
+is MLE with location fixed at zero (`scipy.stats.gamma.fit(..., floc=0)`).
+The log-log panel exposes the power-law tail decay: a straight line on
+log-log means $\Pr(Y > y) \propto y^{-\alpha}$.
+
+```{python}
+gamma_cdf_diagnostic(data)
+```
+
+What to look for:
+
+- **Linear panel**: empirical and theoretical should overlap in the bulk;
+  visible divergence near the right edge is the first hint that a heavier-
+  tailed family (lognormal, Pareto) would fit the upper tail better.
+- **Log-log panel**: the right-hand tail of the empirical CDF should run
+  parallel to the Gamma curve. A steeper empirical line means the actual
+  tail decays faster than Gamma (good Gamma fit); a flatter line means a
+  heavier-than-Gamma tail (the capping at `CLAIM_CAP` flattens the
+  very-far-right tail by construction — that is expected here). The log-y
+  lower bound is pinned to the smallest *observed* probability with two
+  decades of headroom — the fitted Gamma can drop far below the empirical
+  when the real tail is heavier than Gamma, and that gap is the diagnostic.
+
+The log-log CCDF panel is the textbook heavy-tail view: an exponential
+tail decays as a straight line on log-log (slope $-\alpha$ for
+$\mathrm{Gamma}(\alpha, \beta)$); a heavier-than-Gamma empirical line sits
+*above* the fit, meaning the real tail is fatter than the assumed Gamma
+predicts. The empirical here uses per-claim uncapped `ClaimAmount` (the
+`claims` table returned by `load_mtpl2`) — *not* the per-policy capped
+average that the GLUM severity model fits. The cap at `CLAIM_CAP = 100_000`
+flattens per-policy severity past the cap; per-claim uncapped amounts let the
+true Gamma tail stay visible against the fit. The Gamma MLE re-fits on the
+same per-claim uncapped data so the fitted line reflects the underlying
+distribution. The x-axis is capped at the empirical 99.5th percentile so
+the single most expensive claim does not stretch the panel over multiple
+decades and squash the bulk; the fitted line stops at the same cap. The
+log-y lower bound is pinned to the smallest *observed* survival probability
+with two decades of headroom — the fitted line can drop far below the
+empirical when the family is too light-tailed for the data, and that gap
+is the diagnostic.
+
+```{python}
+gamma_ccdf_diagnostic(data, claims=claims)
+```
 
 ## Reserve a test set before making modelling choices
 
@@ -215,7 +337,8 @@ print_frame(
 Gamma. Selecting it on the test set would make the final comparison optimistic.
 
 **What we do:** fit a small GLUM profile over candidate powers and retain the
-power with the best development-validation likelihood.
+power with the best development-validation likelihood. Every Tweedie diagnostic
+below uses this `selected_power` so the fitted family matches the model.
 
 **Best practice:** select every hyperparameter, including distributional
 choices, without opening the test set; retain the profile for review.
@@ -228,6 +351,150 @@ selected_power, power_profile = select_tweedie_power(
 print_frame("Tweedie power profile", power_profile)
 print(f"Selected Tweedie power: {selected_power:.1f}")
 ```
+
+### Pure premium: Poisson-Gamma compound assumption
+
+Per-policy `ClaimAmountCapped` (including zero for claim-free policies) is
+the observable the Tweedie model targets. The Tweedie compound model is
+$Y = \sum_{k=1}^{N} X_k$ with $N \sim \mathrm{Poisson}(\lambda)$ and
+$X_k \overset{\mathrm{iid}}{\sim} \mathrm{Gamma}(\alpha, \beta)$, giving
+$\mathrm{Var}[Y] = \phi\,E[Y]^p$ for $1 < p < 2$. The empirical CDF is
+weighted by `Exposure`. The Tweedie fit is maximum likelihood on the data,
+via glum's series-based Tweedie log-likelihood (profile over $\mu$, with
+$\phi$ solved from Pearson residuals) — the same fit `select_tweedie_power`
+uses internally.
+
+```{python}
+tweedie_cdf_diagnostic(data, tweedie_power=selected_power)
+```
+
+What to look for:
+
+- **Linear panel**: a step at zero is the share of claim-free policies; it
+  is what makes the Tweedie compound identifiable. Empirical and theoretical
+  should agree on that step height.
+- **Log-y panel**: the tail of the empirical CDF should track the
+  theoretical one. A flatter empirical line at high values indicates a
+  heavier tail than Tweedie predicts at the chosen `p`; if that holds at
+  every candidate power, the Tweedie family is wrong here, not just the
+  power. The log-y lower bound is pinned to the smallest *observed*
+  probability with one decade of headroom — tighter than the Poisson and
+  Gamma panels, because the Tweedie CCDF decays faster on this data and
+  the extra empty space below doesn't carry diagnostic signal.
+
+The log-log CCDF panel is cropped to the positive support (1st positive
+percentile to 99.5th percentile) so log-x succeeds and the small-mass
+extreme does not stretch the panel; the zero-mass step the linear panel
+documents is dropped here. The empirical uses `ClaimAmountOriginal`
+(per-policy uncapped aggregate, exposure-weighted) rather than
+`ClaimAmountCapped` — the cap applies per claim, so a policy with multiple
+capped claims can still aggregate above `CLAIM_CAP`, and the uncapped
+aggregate reveals the true per-policy tail against the Tweedie fit. The
+fitted Tweedie line stops at the same 99.5th percentile cap. On log-log,
+the empirical line above the Tweedie fit means the observed tail decays
+more slowly than the assumed Poisson-Gamma compound predicts — same
+diagnosis as Gamma, but for the per-policy aggregate. The log-y lower
+bound is pinned to the smallest *observed* survival probability with one
+decade of headroom — tighter than the Gamma panel, because the Tweedie
+CCDF decays faster on this data and the extra empty space below doesn't
+carry diagnostic signal.
+
+```{python}
+tweedie_ccdf_diagnostic(data, tweedie_power=selected_power)
+```
+
+### Mean-variance relationship by area
+
+Three panels, one per response, each grouping by `Area` (six levels in the
+freMTPL2 portfolio, every level with sufficient exposure and claim count).
+Per group `g` we compute the weighted mean and weighted variance of the
+target using the same target/weight convention as the models: `Exposure`
+weight for frequency and pure premium, `ClaimNb` weight for severity.
+Then we fit $\mathrm{Var} \approx \phi \cdot \mu^p$ on the per-group
+points and read off $\hat p$.
+
+Expected outcomes:
+
+- **Frequency** — `p̂` near 1, the Poisson identity $\mathrm{Var}[N] = E[N]$.
+- **Severity** — `p̂` near 2, the Gamma identity $\mathrm{Var}[Y] = E[Y]^2/\alpha$.
+- **Pure premium** — `p̂` between 1 and 2, consistent with the Tweedie
+  compound; the fitted power is what the data says, not the legend default.
+
+```{python}
+mean_variance_diagnostic(data, by="Area", tweedie_power=selected_power)
+```
+
+What to look for:
+
+- **Points hugging the fitted line** means the variance function is the
+  right shape across segments.
+- **Fitted `p` matching the family** is the basic sanity check: Poisson
+  frequency data should give `p̂ ≈ 1`; Gamma severity should give `p̂ ≈ 2`;
+  Tweedie pure premium should give `p̂ ∈ (1, 2)`.
+- **Points systematically above the fitted line at high means** indicate
+  that a heavier-tailed family is needed (or that a single fitted power
+  cannot capture the variance function across the full range).
+- **Comparing `p̂` to the chosen Tweedie power** is a model-vs-data cross-
+  check: if the per-group fit gives a `p̂` clearly different from
+  `selected_power`, the deviance-optimal power may be different — re-run
+  `select_tweedie_power` (or extend its candidate grid) and re-validate.
+
+::: {.callout-note collapse="true"}
+## Look inside: `weighted_empirical_cdf`, `mean_variance_table`, `tweedie_cdf_diagnostic`
+
+`weighted_empirical_cdf` step-by-step:
+
+1. **Validate** that all weights are positive and sum to a positive number
+   (the CDF normalisation needs a finite positive total weight).
+2. **Sort** values ascending with `kind="stable"` so ties keep their
+   input order (irrelevant for the CDF but consistent with `lorenz_curve`).
+3. **Cumulative** weighted count, divided by the total weight, gives the
+   weighted empirical CDF.
+
+```{python}
+show_source(weighted_empirical_cdf)
+```
+
+`mean_variance_table` step-by-step:
+
+1. **Resolve** the target/weight pair through `target_and_weight`, the
+   same helper the models use, so the diagnostic sees exactly what the
+   models see.
+2. **Group** rows by the chosen column and apply one aggregation: weighted
+   mean and weighted variance using `np.average` with the resolved weights.
+3. **Fit** $\mathrm{Var} \approx \phi \cdot \mu^p$ on the per-group points
+   with `scipy.optimize.curve_fit`, starting from the canonical power for
+   each response (1 for frequency, 2 for severity, 1.5 for pure premium).
+4. **Return** the per-group table and the fitted `(p̂, φ̂)` so the caller
+   can plot and report both.
+
+```{python}
+show_source(mean_variance_table)
+```
+
+`tweedie_cdf_diagnostic` step-by-step (the same shape as the Poisson and
+Gamma diagnostic, with a profile-MLE Tweedie fit):
+
+1. **Fit** $(\hat\mu, \hat\phi)$ by profile maximum likelihood on per-policy
+   `ClaimAmountCapped` (weighted by `Exposure`): scan over $\mu$ on the log
+   scale, solve $\phi$ from Pearson residuals at each $\mu$, pick the $\mu$
+   that maximizes glum's series-based Tweedie log-likelihood, re-evaluate
+   $\phi$ at $\hat\mu$. Matches the fit `select_tweedie_power` uses
+   internally, so the diagnostic is consistent with the rest of the tutorial.
+   Falls back to the moment-based estimator when MLE cannot return finite
+   values (all-zero data and the like).
+2. **Evaluate** the Tweedie CDF by truncating the Poisson–Gamma series on a
+   linear grid up to the observed maximum and overlay it on the empirical
+   CDF.
+
+```{python}
+show_source(tweedie_cdf_diagnostic)
+```
+
+The MLE fit is the standard GLM recipe (profile over the mean, dispersion
+from Pearson residuals); the per-group mean-variance check above is the
+cross-check that decides whether the chosen power is right.
+:::
 
 ## Fit an interpretable GLUM benchmark
 
