@@ -17,9 +17,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/configure-pages@v4
       - uses: quarto-dev/quarto-actions/setup@v2
-      - run: quarto render book --no-execute
-      - uses: actions/upload-pages-artifact@v3
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install Jupyter kernel
+        run: |
+          uv pip install --system --break-system-packages jupyter ipykernel
+          python -m ipykernel install --user --name=python3 --display-name="Python 3"
+      - run: quarto render book
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: book/_book
 
