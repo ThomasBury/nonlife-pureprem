@@ -19,15 +19,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/configure-pages@v4
       - uses: quarto-dev/quarto-actions/setup@v2
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-      - name: Sync project environment
-        run: |
-          uv sync --locked
-          uv run python -m ipykernel install --user --name=python3 --display-name="Python 3"
-          echo "QUARTO_PYTHON=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
-      - run: quarto render book
+      - run: quarto render book --no-execute
       - uses: actions/upload-pages-artifact@v4
         with:
           path: book/_book
