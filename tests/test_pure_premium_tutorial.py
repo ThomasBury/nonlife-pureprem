@@ -530,13 +530,15 @@ class PurePremiumTutorialTest(unittest.TestCase):
 
     def test_eccdf_diagnostic_helpers_smoke(self) -> None:
         data = synthetic_pricing_frame(80)
-        for diagnostic in (
-            lambda: poisson_ccdf_diagnostic(data),
-            lambda: gamma_ccdf_diagnostic(data),
-            lambda: tweedie_ccdf_diagnostic(data, tweedie_power=1.5),
-        ):
-            fig, _axis = diagnostic()
+        diagnostics = {
+            "poisson": (lambda: poisson_ccdf_diagnostic(data), 4),
+            "gamma": (lambda: gamma_ccdf_diagnostic(data), 3),
+            "tweedie": (lambda: tweedie_ccdf_diagnostic(data, tweedie_power=1.5), 2),
+        }
+        for call, expected in diagnostics.values():
+            fig, axis = call()
             self.assertIsNotNone(fig)
+            self.assertEqual(len(axis.get_legend().legend_handles), expected)
             plt.close(fig)
 
     def test_prepare_mtpl_data_returns_per_claim_dataframe(self) -> None:

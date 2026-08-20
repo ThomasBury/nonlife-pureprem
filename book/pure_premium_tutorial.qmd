@@ -240,6 +240,29 @@ decay shows up as the empirical curve flattening above the Poisson `sf`.
 The log-y lower bound is pinned to the smallest *observed* survival
 probability with two decades of headroom.
 
+Two alternative count families are overlaid on the same panel so a
+departure from Poisson can be attributed to a specific shape:
+
+- **Negative Binomial** (sky blue): adds a dispersion knob to Poisson,
+  $\mathrm{Var}[N] = \lambda + \alpha \lambda^{2}$, which absorbs mild
+  overdispersion. Fit is MLE on the raw per-policy counts via
+  `scipy.stats.fit(nbinom, counts, bounds={"n": (0, 100)})` (location
+  fixed at zero by the discrete convention). The expected pattern is NB
+  sitting on top of Poisson in the tail when the empirical does too, and
+  collapsing back to Poisson when $\alpha$ is small.
+- **Conway–Maxwell–Poisson** (bluish green): adds a second parameter
+  $\nu$ that handles both over- and under-dispersion in a single knob,
+  $\nu < 1$ overdispersed, $\nu > 1$ underdispersed, $\nu = 1$ Poisson.
+  scipy.stats does not expose CMP, so the library implements it via a
+  truncated-series log-PMF and Nelder–Mead on $(\log \lambda, \log \nu)$
+  (see `_cmp_log_pmf` and `_fit_cmp_mle`). When the data has so much
+  zero-inflation that even CMP cannot match it, the MLE pushes $\nu$ all
+  the way to its $\nu \to 0$ boundary — the geometric limit. That is
+  itself a diagnostic: it says "this distribution is more concentrated
+  at zero than any single CMP can express, consider a hurdle model or
+  zero-inflated binomial." When the fitted $\hat\nu$ sits clearly off 1
+  in either direction, the count family needs to absorb it.
+
 ```{python}
 poisson_ccdf_diagnostic(data)
 ```
@@ -289,6 +312,24 @@ log-y lower bound is pinned to the smallest *observed* survival probability
 with two decades of headroom — the fitted line can drop far below the
 empirical when the family is too light-tailed for the data, and that gap
 is the diagnostic.
+
+A **Generalized Pareto** line is overlaid on the same panel as an
+alternative heavy-tail family. GP is the canonical tail-over-threshold
+distribution with shape $c > 0$ on $[0, \infty)$ and finite mean only
+when $c < 1$ — a fitted $\hat c < 1$ therefore confirms the empirical
+mean is finite, while $\hat c \ge 1$ is a warning sign that the
+distribution does not have a finite mean under the GP assumption. Fit
+is MLE on the same per-claim uncapped amounts with location fixed at
+zero (`scipy.stats.genpareto.fit(..., floc=0)`). GP is traditionally used
+on excesses-over-threshold rather than the full distribution; the full
+fit here is a diagnostic shortcut — when the empirical sits above the
+Gamma line on this log-log view and the GP line tracks it more closely,
+the heavier tail is Pareto-shaped rather than Gamma-shaped, i.e., a
+power-law decay that has implications for capital modelling that Gamma
+does not. When the GP line still sits visibly below the empirical at
+the right end, GP is not heavy-tailed enough either, and a heavier
+family (lognormal with high $\sigma$, or a true Pareto mixture) is the
+next step.
 
 ```{python}
 gamma_ccdf_diagnostic(data, claims=claims)

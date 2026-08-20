@@ -41,8 +41,9 @@ from glum import (
 )
 from rich.console import Console
 from rich.table import Table
-from scipy.optimize import curve_fit, minimize_scalar
-from scipy.stats import gamma, poisson
+from scipy.optimize import curve_fit, minimize, minimize_scalar
+from scipy.special import gammaln, logsumexp
+from scipy.stats import fit, gamma, genpareto, nbinom, poisson
 from sklearn.datasets import fetch_openml
 from sklearn.metrics import (
     mean_gamma_deviance,
@@ -68,6 +69,8 @@ CONSOLE = Console()
 # through every helper.
 _EMPIRICAL_COLOR = "#000000"
 _FIT_COLOR = "#E69F00"
+_FIT_COLOR_2 = "#56B4E9"
+_FIT_COLOR_3 = "#009E73"
 
 CATEGORICAL_FEATURES = ["VehBrand", "VehPower", "VehGas", "Region", "Area"]
 LIGHTGBM_FEATURES = [
@@ -469,15 +472,22 @@ def poisson_ccdf_diagnostic(
     data: pd.DataFrame,
     axes: plt.Axes | None = None,
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Compare the weighted empirical ClaimNb CCDF to Poisson sf(λ̂) on a log-y axis."""
+    """Compare the weighted empirical ClaimNb CCDF to Poisson, Negative Binomial
+
+    NB absorbs overdispersion (``Var[N] = μ + α·μ²``); 
+    """
     fig, axis = _single_panel_axes(axes, (6.5, 4.5))
     lambda_hat = float(data["ClaimNb"].sum() / data["Exposure"].sum())
+    counts = data["ClaimNb"].to_numpy(dtype=int)
+    nbinom_fit = fit(nbinom, counts, bounds={"n": (0.0, 100.0)})
+    n_nbinom, p_nbinom = float(nbinom_fit.params.n), float(nbinom_fit.params.p)
     empirical_x, empirical_s = weighted_empirical_ccdf(
         data["ClaimNb"].to_numpy(dtype=float),
         data["Exposure"].to_numpy(dtype=float),
     )
     x_grid = np.arange(int(empirical_x.max()) + 2)
-    theoretical_s = poisson.sf(x_grid, lambda_hat)
+    poisson_s = poisson.sf(x_grid, lambda_hat)
+    nbinom_s = nbinom.sf(x_grid, n_nbinom, p_nbinom)
     axis.step(
         empirical_x,
         empirical_s,
@@ -487,10 +497,17 @@ def poisson_ccdf_diagnostic(
     )
     axis.step(
         x_grid,
-        theoretical_s,
+        poisson_s,
         where="post",
         color=_FIT_COLOR,
         label=f"Poisson(λ={lambda_hat:.4f})",
+    )
+    axis.step(
+        x_grid,
+        nbinom_s,
+        where="post",
+        color=_FIT_COLOR_2,
+        label=f"NB(n={n_nbinom:.2f}, p={p_nbinom:.3f})",
     )
     axis.set_yscale("log")
     _set_log_y_observed_floor(axis, empirical_s.min())
@@ -549,19 +566,19 @@ def gamma_ccdf_diagnostic(
     claims: pd.DataFrame | None = None,
     axes: plt.Axes | None = None,
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Compare the empirical severity CCDF to Gamma sf(α̂, β̂) on log-log axes.
+    """Compare the empirical severity CCDF to Gamma and Generalized-Pareto sf on log-log axes.
 
     When ``claims`` (the per-claim DataFrame from :func:`prepare_mtpl_data`) is
-    supplied, the empirical and the Gamma fit both switch to per-claim
-    uncapped ``ClaimAmount`` so the cap at ``CLAIM_CAP`` does not flatten the
-    tail in the diagnostic. With ``claims=None`` the function falls back to
-    the per-policy ``Severity`` (capped, claim-weighted) — kept for back
+    supplied, the empirical and both fits switch to per-claim uncapped
+    ``ClaimAmount`` so the cap at ``CLAIM_CAP`` does not flatten the tail in
+    the diagnostic. With ``claims=None`` the function falls back to the
+    per-policy ``Severity`` (capped, claim-weighted) — kept for back
     compatibility and for callers that do not have per-claim data.
 
     The x-axis is capped at the empirical 99.5th percentile so the single
     most expensive claim does not stretch the panel over multiple decades
-    and squash the bulk; the fitted Gamma line is drawn only up to the
-    same cap so both lines share the visible x-range.
+    and squash the bulk; both fitted lines are drawn only up to the same
+    cap so all three lines share the visible x-range.
     """
     fig, axis = _single_panel_axes(axes, (6.5, 4.5))
     if claims is not None:
@@ -574,6 +591,7 @@ def gamma_ccdf_diagnostic(
         weights = claim_rows["ClaimNb"].to_numpy(dtype=float)
         empirical_label = "Empirical (per-policy avg, capped)"
     alpha, _, beta = gamma.fit(severity, floc=0)
+    c_gp, _, scale_gp = genpareto.fit(severity, floc=0)
     upper = float(np.quantile(severity, 0.995, weights=weights, method="inverted_cdf"))
     empirical_x, empirical_s = weighted_empirical_ccdf(severity, weights)
     within = empirical_x <= upper
@@ -581,6 +599,7 @@ def gamma_ccdf_diagnostic(
     empirical_s = empirical_s[within]
     x_grid = np.geomspace(max(severity.min(), 1.0), upper, 400)
     theoretical_s = gamma.sf(x_grid, alpha, scale=beta)
+    gp_s = genpareto.sf(x_grid, c_gp, loc=0, scale=scale_gp)
     axis.step(
         empirical_x,
         empirical_s,
@@ -593,6 +612,12 @@ def gamma_ccdf_diagnostic(
         theoretical_s,
         color=_FIT_COLOR,
         label=f"Gamma(α={alpha:.3f}, β={beta:.0f})",
+    )
+    axis.plot(
+        x_grid,
+        gp_s,
+        color=_FIT_COLOR_2,
+        label=f"GenPareto(c={c_gp:.3f}, scale={scale_gp:.0f})",
     )
     axis.set_xscale("log")
     axis.set_yscale("log")
