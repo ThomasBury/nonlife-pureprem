@@ -16,11 +16,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/configure-pages@v4
+      - uses: actions/checkout@v7
+      - uses: actions/configure-pages@v6
       - uses: quarto-dev/quarto-actions/setup@v2
-      - run: quarto render book --no-execute
-      - uses: actions/upload-pages-artifact@v4
+      - run: quarto render book
+      - run: grep -q 'pure_premium_tutorial_files/figure-html' book/_book/pure_premium_tutorial.html
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: book/_book
 
@@ -35,4 +36,4 @@ jobs:
     needs: build
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
