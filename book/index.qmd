@@ -32,10 +32,10 @@ The tutorial produces four final pure-premium predictions:
 
 ## Companion chapters
 
-The **Pure-premium tutorial** chapter walks through the full real-data comparison.
+The Pure-premium tutorial chapter walks through the full real-data comparison.
 
-The **Poisson offset–weight** and **Tweedie offset–weight** chapters provide
-synthetic-data empirical verification that counts + offset ≡ rates + weights.
+The Poisson offset–weight and Tweedie offset–weight chapters compare
+offset and weighted-rate formulations on simulated data.
 
 ## Setup
 

@@ -2,16 +2,14 @@
 title: "Poisson Offset–Weight Equivalence"
 ---
 
-This chapter is intentionally small and discrete. It shows three equivalent ways
-to teach the Poisson case with exposure:
+This chapter compares three equivalent Poisson formulations with exposure:
 
 1. counts + offset via `init_score = log(exposure)`
 2. rates + weights via `weight = exposure`
 3. a custom objective that injects the offset directly in the gradients
 
-Compared with the main real-data tutorial, this file keeps the feature space and
-data-generating process simple enough that the equivalence is easy to inspect by
-eye in the output.
+Two categorical features and simulated claim counts let you compare the
+predictions directly in the output tables.
 
 ```{python}
 import lightgbm as lgb
@@ -163,7 +161,7 @@ data_mod["sol_1_predict_raw"] = predicted_counts_mod
 
 ```{python}
 def solution_1b_predict(data_curr: pd.DataFrame) -> np.ndarray:
-    """Tweedie(p=1) LightGBM with log(exposure) offset — equivalent to Poisson."""
+    """Tweedie(p=1) LightGBM with log(exposure) offset (equivalent to Poisson)."""
     data_curr_recoded = data_curr[["var1", "var2"]].copy()
     for col in ["var1", "var2"]:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes

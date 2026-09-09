@@ -2,7 +2,8 @@
 title: "Tweedie Offset–Weight Equivalence"
 ---
 
-This chapter provides:
+This chapter compares Tweedie totals with an exposure offset against rates
+with exposure weights. It includes:
 
 - A data generator for Tweedie totals with exposure
 - scikit-learn TweedieRegressor: rates + correct `sample_weight = exposure**(2 - p)`
@@ -11,9 +12,10 @@ This chapter provides:
 - Numeric checks: deviance equivalence across implementations
 - Special cases: Poisson (p=1), Gamma (p=2)
 
-**Attention:** valid for generic Tweedie. For a Compound Poisson-Gamma, the
-distribution is also Tweedie but with a specific dispersion. For application to
-pure-premium modelling, refer to the theory chapter and the pure-premium tutorial.
+These examples use a common dispersion for Tweedie totals. The compound
+Poisson–Gamma process in the theory chapter uses a dispersion that varies with
+exposure. See that chapter and the pure-premium tutorial for the corresponding
+exposure weights.
 
 ```{python}
 from __future__ import annotations
