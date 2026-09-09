@@ -33,8 +33,9 @@ The tutorial produces four final pure-premium predictions:
 
 GLUM provides formula-based spline/categorical models, regularized predictive
 fits, full Tweedie likelihood for development selection of p, and separate
-unregularized robust coefficient tables. LightGBM is the only nonlinear model
-family and is tuned only on the internal development-validation split.
+unregularized coefficient tables with sandwich standard errors. LightGBM is
+the only nonlinear model family and is tuned only on the internal
+development-validation split.
 
 ## Setup and Run
 
@@ -58,10 +59,9 @@ uv run ruff format --check .
 
 ## Quarto Book
 
-The interactive tutorials live in `book/` as `.qmd` chapters. The Quarto CLI
-is an external prerequisite and must be installed separately from the Python
-environment. After `uv sync`, render from the repository root with Quarto
-pinned to the project virtual environment.
+The interactive tutorials live in `book/` as `.qmd` chapters. Install the
+Quarto CLI separately from the Python environment. After `uv sync`, render
+from the repository root with Quarto pinned to the project virtual environment.
 
 POSIX:
 
@@ -81,7 +81,7 @@ Before merging a change that alters an executable chapter or its results, run
 the full local render and commit the refreshed `book/_freeze/` results with it.
 GitHub Pages renders the book with `freeze: auto` and restores the committed
 `_freeze/` outputs; the CI step does not need Python, and a stale freeze will
-fail the build loudly.
+fail the build.
 
 Chapters cover the full pricing comparison, Poisson and Tweedie offset-weight
 equivalence, and the underlying compound Poisson-Gamma theory.
@@ -104,13 +104,13 @@ By default, the main tutorial writes to artifacts/pure_premium:
 - pure_premium_lift.png;
 - pure_premium_double_lift.png.
 
-The coefficient intervals are classical robust inference conditional on the
-chosen unregularized specification. They are not inference for the penalized
-predictive fits.
+The coefficient intervals use sandwich standard errors and apply to the
+chosen unregularized specification. They do not describe uncertainty in the
+penalized predictive fits.
 
 Validation reports weighted deviance, D2, aggregate actual/expected, raw and
 normalized Gini, and exposure-balanced lift deciles. The tutorial reports the
-evidence without automatic model-superiority or universal calibration verdicts.
+metrics for the reader to assess model performance and calibration.
 
 ## Companion Material
 
@@ -123,5 +123,5 @@ exposure^(2-p).
 
 Focused companion chapters in the book:
 
-- [book/poisson_offset_weight.qmd](book/poisson_offset_weight.qmd) — Poisson offset-weight equivalence
-- [book/tweedie_offset_weight.qmd](book/tweedie_offset_weight.qmd) — Tweedie offset-weight equivalence
+- [book/poisson_offset_weight.qmd](book/poisson_offset_weight.qmd): Poisson offset-weight equivalence
+- [book/tweedie_offset_weight.qmd](book/tweedie_offset_weight.qmd): Tweedie offset-weight equivalence
