@@ -41,9 +41,9 @@ from glum import (
 )
 from rich.console import Console
 from rich.table import Table
-from scipy.optimize import curve_fit, minimize, minimize_scalar
-from scipy.special import gammaln, logsumexp
-from scipy.stats import fit, gamma, genpareto, nbinom, poisson
+from scipy.optimize import minimize_scalar
+from scipy.special import betaln
+from scipy.stats import gamma, nbinom, poisson
 from sklearn.datasets import fetch_openml
 from sklearn.metrics import (
     mean_gamma_deviance,
@@ -70,7 +70,6 @@ CONSOLE = Console()
 _EMPIRICAL_COLOR = "#000000"
 _FIT_COLOR = "#E69F00"
 _FIT_COLOR_2 = "#56B4E9"
-_FIT_COLOR_3 = "#009E73"
 
 CATEGORICAL_FEATURES = ["VehBrand", "VehPower", "VehGas", "Region", "Area"]
 LIGHTGBM_FEATURES = [
@@ -216,6 +215,7 @@ def prepare_mtpl_data(
     capped_total = float(policies["ClaimAmountCapped"].sum())
     report: dict[str, int | float] = {
         "policies": len(policies),
+        "claim_cap": claim_cap,
         "positive_claims": int(policies["ClaimNb"].sum()),
         "exposure_capped_rows": exposure_capped_rows,
         "claim_count_mismatch_rows": int(
@@ -293,10 +293,16 @@ def weighted_empirical_cdf(
     """Return sorted ``values`` and their weighted empirical CDF."""
     values = np.asarray(values, dtype=float)
     weights = np.asarray(weights, dtype=float)
-    if np.any(weights <= 0) or weights.sum() <= 0:
-        raise ValueError("weights must be positive")
+    if values.ndim != 1 or values.size == 0 or values.shape != weights.shape:
+        raise ValueError("values and weights must be aligned nonempty 1D arrays")
+    if np.any(~np.isfinite(values)):
+        raise ValueError("values must be finite")
+    if np.any(~np.isfinite(weights) | (weights <= 0)) or not np.isfinite(weights.sum()):
+        raise ValueError("weights must be finite and positive")
     order = np.argsort(values, kind="stable")
-    return values[order], np.cumsum(weights[order]) / weights.sum()
+    unique, starts = np.unique(values[order], return_index=True)
+    cumulative = np.cumsum(np.add.reduceat(weights[order], starts))
+    return unique, cumulative / cumulative[-1]
 
 
 def weighted_empirical_ccdf(
@@ -347,580 +353,515 @@ def _set_log_y_observed_floor(
         axis.set_ylim(bottom=float(empirical_min) / factor)
 
 
-def _fit_tweedie_mle(
-    y: np.ndarray,
+def fit_gamma_dispersion(
+    y: np.ndarray, mean: np.ndarray, claim_count: np.ndarray
+) -> float:
+    """Fit base phi with fixed means and Gamma(n/phi, phi*mean/n) likelihood.
+
+    Each policy contributes once: n already scales its dispersion.
+    """
+    y, mean, claim_count = (np.asarray(v, dtype=float) for v in (y, mean, claim_count))
+    if (
+        y.ndim != 1
+        or y.size == 0
+        or y.shape != mean.shape
+        or y.shape != claim_count.shape
+    ):
+        raise ValueError("y, mean and claim_count must be aligned nonempty 1D arrays")
+    if any(np.any(~np.isfinite(v) | (v <= 0)) for v in (y, mean, claim_count)):
+        raise ValueError("y, mean and claim_count must be finite and positive")
+    if np.any(claim_count != np.floor(claim_count)):
+        raise ValueError("claim_count must contain integers")
+    start = float(np.mean(claim_count * (y / mean - 1) ** 2))
+    if not np.isfinite(start) or start <= 0:
+        raise ValueError("dispersion fitting needs a positive finite start")
+
+    def objective(log_phi: float) -> float:
+        with np.errstate(
+            over="ignore", under="ignore", divide="ignore", invalid="ignore"
+        ):
+            phi = np.exp(log_phi)
+            likelihood = gamma.logpdf(
+                y, a=claim_count / phi, scale=phi * mean / claim_count
+            ).sum()
+        return -float(likelihood) if np.isfinite(likelihood) else float("inf")
+
+    result = minimize_scalar(
+        objective, bracket=(np.log(start) - np.log(2), np.log(start))
+    )
+    with np.errstate(over="ignore", under="ignore"):
+        dispersion = float(np.exp(result.x))
+    if (
+        not result.success
+        or not np.isfinite(result.fun)
+        or not np.isfinite(dispersion)
+        or dispersion <= 0
+    ):
+        raise RuntimeError(f"Gamma dispersion optimization failed: {result.message}")
+    return dispersion
+
+
+def fit_negative_binomial_shape(counts: np.ndarray, mean: np.ndarray) -> float:
+    """Fit positive real r at fixed policy-count means; infinity is the Poisson limit.
+
+    Compare the optimized NB likelihood with the exact Poisson likelihood.
+    A difference below 1e-8 per policy is numerically indistinguishable.
+    """
+    counts, mean = (np.asarray(v, dtype=float) for v in (counts, mean))
+    if counts.ndim != 1 or counts.size == 0 or counts.shape != mean.shape:
+        raise ValueError("counts and mean must be aligned nonempty 1D arrays")
+    if np.any(~np.isfinite(counts) | (counts < 0) | (counts != np.floor(counts))):
+        raise ValueError("counts must be finite nonnegative integers")
+    if np.any(~np.isfinite(mean) | (mean <= 0)):
+        raise ValueError("mean must be finite and positive")
+
+    def objective(log_shape: float) -> float:
+        shape = np.exp(log_shape)
+        # Log beta avoids cancellation between large log-gamma values near Poisson.
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            likelihood = (
+                -betaln(shape, counts + 1)
+                - np.log(shape + counts)
+                + counts * (np.log(mean) - log_shape)
+                - (shape + counts) * np.log1p(mean / shape)
+            ).sum()
+        return -float(likelihood) if np.isfinite(likelihood) else float("inf")
+
+    # ponytail: bound r to [1e-8, 1e8]; use a stable asymptotic likelihood if a boundary matters.
+    bounds = (np.log(1e-8), np.log(1e8))
+    result = minimize_scalar(objective, bounds=bounds, method="bounded")
+    if not result.success or not np.isfinite(result.fun) or not np.isfinite(result.x):
+        raise RuntimeError(f"NB shape optimization failed: {result.message}")
+    poisson_nll = -float(poisson.logpmf(counts, mean).sum())
+    if not np.isfinite(poisson_nll):
+        raise RuntimeError("NB Poisson-limit likelihood is non-finite")
+    if poisson_nll <= result.fun + 1e-8 * len(counts):
+        return float("inf")
+    if not bounds[0] + 1e-4 < result.x < bounds[1] - 1e-4:
+        raise RuntimeError("NB shape optimization reached a numerical bound")
+    return float(np.exp(result.x))
+
+
+def _diagnostic_inputs(
+    data: pd.DataFrame, mean: pd.Series, component: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Require eligible rows and indexed predictions in exactly the same order."""
+    if (
+        not isinstance(mean, pd.Series)
+        or not data.index.is_unique
+        or not mean.index.equals(data.index)
+    ):
+        raise ValueError(
+            "mean must be a Series aligned with the unique supplied row index"
+        )
+    rows, target, weight = target_and_weight(data, component)
+    if len(rows) != len(data) or len(rows) == 0:
+        raise ValueError("supply nonempty eligible rows for this component")
+    prediction = mean.to_numpy(dtype=float)
+    if np.any(~np.isfinite(prediction) | (prediction <= 0)):
+        raise ValueError("mean must be finite and positive")
+    if np.any(~np.isfinite(target) | (target < 0)) or (
+        component == "severity" and np.any(target == 0)
+    ):
+        raise ValueError("target is outside the component support")
+    if np.any(~np.isfinite(weight) | (weight <= 0)) or not np.isfinite(weight.sum()):
+        raise ValueError("risk weights must be finite and positive")
+    if component in ("frequency", "severity"):
+        counts = data["ClaimNb"].to_numpy(dtype=float)
+        if np.any(~np.isfinite(counts) | (counts < 0) | (counts != np.floor(counts))):
+            raise ValueError("ClaimNb must contain finite nonnegative integers")
+    return target, prediction, weight
+
+
+def _conditional_probability(
+    thresholds: np.ndarray,
+    mean: np.ndarray,
+    weight: np.ndarray,
+    component: str,
+    dispersion: float,
     tweedie_power: float,
-    sample_weight: np.ndarray | None = None,
-) -> tuple[float, float]:
-    """Estimate (μ̂, φ̂) by profile maximum likelihood at a fixed power.
+    *,
+    survival: bool,
+    nb_shape: float | None = None,
+) -> np.ndarray:
+    """Average conditional probabilities in batches of 8 thresholds x 512 rows."""
+    result = np.zeros(len(thresholds))
+    for start in range(0, len(mean), 512):
+        mu, w = mean[start : start + 512], weight[start : start + 512]
+        for offset in range(0, len(thresholds), 8):
+            x = thresholds[offset : offset + 8, None]
+            if component == "frequency":
+                if nb_shape is None or np.isposinf(nb_shape):
+                    probability = (poisson.sf if survival else poisson.cdf)(x, w * mu)
+                else:
+                    probability = (nbinom.sf if survival else nbinom.cdf)(
+                        x, nb_shape, nb_shape / (nb_shape + w * mu)
+                    )
+            elif component == "severity":
+                probability = (gamma.sf if survival else gamma.cdf)(
+                    x, a=w / dispersion, scale=dispersion * mu / w
+                )
+            else:
+                probability = (tweedie_sf_series if survival else tweedie_cdf_series)(
+                    x, w * mu, dispersion * w ** (1 - tweedie_power), tweedie_power
+                )
+            result[offset : offset + 8] += probability @ (w / weight.sum())
+    return result
 
-    Profile MLE: scan over μ on the log scale; at each μ solve φ from Pearson
-    residuals via ``TweedieDistribution.dispersion``; evaluate glum's series
-    Tweedie log-likelihood at (μ, φ(μ)); pick the μ that maximizes it. φ̂ is
-    re-evaluated at μ̂ for the return value. This is the standard GLM recipe
-    and matches what ``select_tweedie_power`` does internally, so the
-    diagnostic uses the same fit as the rest of the tutorial.
 
-    Falls back to the moment-based estimator (μ̂ = weighted mean,
-    φ̂ = Var / μ̂^p) when the optimizer cannot return a finite value (all-zero
-    data, non-finite μ_init, etc.) so an exotic dataset cannot break the
-    diagnostic.
-    """
-    family = TweedieDistribution(tweedie_power)
-    y_arr = np.asarray(y, dtype=float)
-    w_arr = (
-        np.asarray(sample_weight, dtype=float)
-        if sample_weight is not None
-        else np.ones_like(y_arr)
+def _conditional_diagnostic(
+    data, mean, component, dispersion, tweedie_power, axes, *, survival, nb_shape=None
+):
+    """Plot the supplied rows against their fitted mixture, with no fitting or sampling."""
+    target, prediction, weight = _diagnostic_inputs(data, mean, component)
+    if not np.isfinite(dispersion) or dispersion <= 0:
+        raise ValueError("dispersion must be finite and positive")
+    if component == "pure_premium" and not 1 < tweedie_power < 2:
+        raise ValueError("tweedie_power must lie in (1, 2)")
+    if nb_shape is not None and (np.isnan(nb_shape) or nb_shape <= 0):
+        raise ValueError("nb_shape must be positive, or infinity for the Poisson limit")
+    values = (
+        data["ClaimNb"].to_numpy(dtype=float)
+        if component == "frequency"
+        else data["ClaimAmountCapped"].to_numpy(dtype=float)
+        if component == "pure_premium"
+        else target
     )
-    mu_init = float((y_arr * w_arr).sum() / w_arr.sum())
-
-    def moment_fallback() -> tuple[float, float]:
-        variance = float(((y_arr - mu_init) ** 2 * w_arr).sum() / w_arr.sum())
-        phi = variance / mu_init**tweedie_power if mu_init > 0 else float("nan")
-        return mu_init, phi
-
-    if mu_init <= 0:
-        return moment_fallback()
-
-    def neg_log_likelihood(log_mu: float) -> float:
-        mu = float(np.exp(log_mu))
-        pred = np.full_like(y_arr, mu)
-        phi = family.dispersion(y=y_arr, mu=pred, sample_weight=w_arr, ddof=0)
-        return -family.log_likelihood(
-            y=y_arr, mu=pred, sample_weight=w_arr, dispersion=phi
-        )
-
-    try:
-        result = minimize_scalar(
-            neg_log_likelihood,
-            bracket=(
-                np.log(mu_init * 0.5),
-                np.log(mu_init),
-                np.log(mu_init * 2.0),
-            ),
-        )
-    except ValueError:
-        return moment_fallback()
-    mu_hat = float(np.exp(result.x))
-    if not np.isfinite(mu_hat):
-        return moment_fallback()
-    phi_hat = float(
-        family.dispersion(
-            y=y_arr,
-            mu=np.full_like(y_arr, mu_hat),
-            sample_weight=w_arr,
-            ddof=0,
-        )
+    empirical_x, empirical = (
+        weighted_empirical_ccdf if survival else weighted_empirical_cdf
+    )(values, weight)
+    log_x = component == "severity" or (
+        survival and component == "pure_premium" and np.any(values > 0)
     )
-    if not np.isfinite(phi_hat):
-        return moment_fallback()
-    return mu_hat, phi_hat
-
-
-def _set_upper_x_bound(axis: plt.Axes, x_max: float) -> None:
-    """Pin the upper x-axis bound to a quantile-based cap.
-
-    The cap drops the small-mass extreme that would otherwise stretch a log-x
-    axis over multiple decades and squash the bulk.
-    """
-    axis.set_xlim(right=float(x_max))
-
-
-def poisson_cdf_diagnostic(
-    data: pd.DataFrame,
-    axes: tuple[plt.Axes, plt.Axes] | None = None,
-) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
-    """Compare the weighted empirical ClaimNb CDF to Poisson(λ̂) on linear and log-y axes."""
-    fig, axes = _cdf_diagnostic_axes(axes, (11.0, 4.5))
-    lambda_hat = float(data["ClaimNb"].sum() / data["Exposure"].sum())
-    empirical_x, empirical_f = weighted_empirical_cdf(
-        data["ClaimNb"].to_numpy(dtype=float),
-        data["Exposure"].to_numpy(dtype=float),
+    if component == "frequency":
+        grid = np.floor(np.linspace(0, values.max() + 1, 128))
+    elif survival and np.any(values > 0):
+        positive = values > 0
+        lower, upper = np.quantile(
+            values[positive],
+            [0.01, 0.995],
+            weights=weight[positive],
+            method="inverted_cdf",
+        )
+        grid = np.geomspace(lower, max(upper, lower * 1.01), 128)
+    elif component == "severity":
+        grid = np.geomspace(values.min() / 2, values.max() * 1.5, 128)
+    else:
+        grid = np.linspace(0, max(values.max(), 1.0), 128)
+    reference = _conditional_probability(
+        grid,
+        prediction,
+        weight,
+        component,
+        dispersion,
+        tweedie_power,
+        survival=survival,
     )
-    x_grid = np.arange(int(empirical_x.max()) + 2)
-    theoretical_f = poisson.cdf(x_grid, lambda_hat)
-    x_max = int(empirical_x.max())
-    for axis, log_y in zip(axes, (False, True)):
+    label = {
+        "frequency": "Poisson mixture",
+        "severity": f"Gamma mixture (φ={dispersion:.3g})",
+        "pure_premium": f"Tweedie mixture (p={tweedie_power:.2g}, φ={dispersion:.3g})",
+    }[component]
+    observable = {
+        "frequency": "ClaimNb",
+        "severity": "Capped policy-average severity (EUR)",
+        "pure_premium": "Capped policy total (EUR)",
+    }[component]
+    if survival:
+        fig, output_axes = _single_panel_axes(axes, (6.5, 4.5))
+        panels = (output_axes,)
+        within = (empirical_x >= grid[0]) & (empirical_x <= grid[-1])
+        empirical_x, empirical = empirical_x[within], empirical[within]
+    else:
+        fig, output_axes = _cdf_diagnostic_axes(axes, (11.0, 4.5))
+        panels = output_axes
+    for index, axis in enumerate(panels):
         axis.step(
             empirical_x,
-            empirical_f,
-            where="post",
-            color=_EMPIRICAL_COLOR,
-            label="Empirical",
-        )
-        axis.step(
-            x_grid,
-            theoretical_f,
-            where="post",
-            color=_FIT_COLOR,
-            label=f"Poisson(λ={lambda_hat:.4f})",
-        )
-        axis.set_xlabel("ClaimNb")
-        axis.set_ylabel("CDF")
-        axis.set_title("Claim count" + (" (log-y)" if log_y else " (linear)"))
-        if log_y:
-            axis.set_yscale("log")
-            _set_log_y_observed_floor(axis, empirical_f.min())
-        _set_integer_xaxis(axis, x_max)
-        axis.legend()
-    fig.tight_layout()
-    return fig, axes
-
-
-def poisson_ccdf_diagnostic(
-    data: pd.DataFrame,
-    axes: plt.Axes | None = None,
-) -> tuple[plt.Figure, plt.Axes]:
-    """Compare the weighted empirical ClaimNb CCDF to Poisson, Negative Binomial
-
-    NB absorbs overdispersion (``Var[N] = μ + α·μ²``); 
-    """
-    fig, axis = _single_panel_axes(axes, (6.5, 4.5))
-    lambda_hat = float(data["ClaimNb"].sum() / data["Exposure"].sum())
-    counts = data["ClaimNb"].to_numpy(dtype=int)
-    nbinom_fit = fit(nbinom, counts, bounds={"n": (0.0, 100.0)})
-    n_nbinom, p_nbinom = float(nbinom_fit.params.n), float(nbinom_fit.params.p)
-    empirical_x, empirical_s = weighted_empirical_ccdf(
-        data["ClaimNb"].to_numpy(dtype=float),
-        data["Exposure"].to_numpy(dtype=float),
-    )
-    x_grid = np.arange(int(empirical_x.max()) + 2)
-    poisson_s = poisson.sf(x_grid, lambda_hat)
-    nbinom_s = nbinom.sf(x_grid, n_nbinom, p_nbinom)
-    axis.step(
-        empirical_x,
-        empirical_s,
-        where="post",
-        color=_EMPIRICAL_COLOR,
-        label="Empirical",
-    )
-    axis.step(
-        x_grid,
-        poisson_s,
-        where="post",
-        color=_FIT_COLOR,
-        label=f"Poisson(λ={lambda_hat:.4f})",
-    )
-    axis.step(
-        x_grid,
-        nbinom_s,
-        where="post",
-        color=_FIT_COLOR_2,
-        label=f"NB(n={n_nbinom:.2f}, p={p_nbinom:.3f})",
-    )
-    axis.set_yscale("log")
-    _set_log_y_observed_floor(axis, empirical_s.min())
-    axis.set_xlabel("ClaimNb")
-    axis.set_ylabel("CCDF (log-y)")
-    axis.set_title("Claim count right tail (log-y CCDF)")
-    _set_integer_xaxis(axis, int(empirical_x.max()))
-    axis.legend()
-    fig.tight_layout()
-    return fig, axis
-
-
-def gamma_cdf_diagnostic(
-    data: pd.DataFrame,
-    axes: tuple[plt.Axes, plt.Axes] | None = None,
-) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
-    """Compare the weighted empirical Severity CDF to Gamma(α̂, β̂) MLE on linear and log-log axes."""
-    fig, axes = _cdf_diagnostic_axes(axes, (11.0, 4.5))
-    claims = data.loc[data["ClaimNb"] > 0]
-    severity = claims["Severity"].to_numpy(dtype=float)
-    weights = claims["ClaimNb"].to_numpy(dtype=float)
-    alpha, _, beta = gamma.fit(severity, floc=0)
-    empirical_x, empirical_f = weighted_empirical_cdf(severity, weights)
-    x_grid = np.geomspace(max(severity.min(), 1.0), empirical_x.max() * 1.5, 400)
-    theoretical_f = gamma.cdf(x_grid, alpha, scale=beta)
-    for axis, log_axes in zip(axes, (False, True)):
-        axis.step(
-            empirical_x,
-            empirical_f,
+            empirical,
             where="post",
             color=_EMPIRICAL_COLOR,
             label="Empirical",
         )
         axis.plot(
-            x_grid,
-            theoretical_f,
+            grid,
+            reference,
             color=_FIT_COLOR,
-            label=f"Gamma(α={alpha:.3f}, β={beta:.0f})",
+            label=label,
+            drawstyle="steps-post" if component == "frequency" else "default",
         )
-        axis.set_xlabel("Severity (EUR)")
-        axis.set_ylabel("CDF")
-        if log_axes:
+        if nb_shape is not None:
+            nb = _conditional_probability(
+                grid,
+                prediction,
+                weight,
+                component,
+                dispersion,
+                tweedie_power,
+                survival=survival,
+                nb_shape=nb_shape,
+            )
+            nb_label = (
+                "NB: Poisson limit (r=∞)"
+                if np.isposinf(nb_shape)
+                else f"NB mixture (r={nb_shape:.3g})"
+            )
+            axis.step(grid, nb, where="post", color=_FIT_COLOR_2, label=nb_label)
+        if log_x and (survival or index == 1):
             axis.set_xscale("log")
+        if survival or index == 1:
             axis.set_yscale("log")
-            _set_log_y_observed_floor(axis, empirical_f.min())
-            axis.set_title("Severity (log-log)")
-        else:
-            axis.set_title("Severity (linear)")
+            positive_probability = empirical[empirical > 0]
+            if positive_probability.size:
+                _set_log_y_observed_floor(axis, float(positive_probability.min()))
+        if component == "frequency":
+            _set_integer_xaxis(axis, int(values.max()))
+        elif survival:
+            axis.set_xlim(grid[0], grid[-1])
+        axis.set_xlabel(observable)
+        axis.set_ylabel("SF: P(Y > x)" if survival else "CDF: P(Y ≤ x)")
+        axis.set_title(
+            f"{component.replace('_', ' ').title()} (n={len(data):,} policies)"
+        )
         axis.legend()
     fig.tight_layout()
-    return fig, axes
+    return fig, output_axes
+
+
+def poisson_cdf_diagnostic(data: pd.DataFrame, mean: pd.Series, axes=None):
+    """Exposure-weighted policy counts versus Poisson(Exposure * predicted rate)."""
+    return _conditional_diagnostic(
+        data, mean, "frequency", 1.0, 1.0, axes, survival=False
+    )
+
+
+def poisson_ccdf_diagnostic(
+    data: pd.DataFrame, mean: pd.Series, nb_shape: float, axes=None
+):
+    """Count survival with a fitted real NB shape; infinity labels the Poisson limit."""
+    if nb_shape is None:
+        raise ValueError("nb_shape is required")
+    return _conditional_diagnostic(
+        data, mean, "frequency", 1.0, 1.0, axes, survival=True, nb_shape=nb_shape
+    )
+
+
+def gamma_cdf_diagnostic(
+    data: pd.DataFrame, mean: pd.Series, dispersion: float, axes=None
+):
+    """Claim-weighted capped policy-average severity versus Gamma(n/phi, phi*mean/n)."""
+    return _conditional_diagnostic(
+        data, mean, "severity", dispersion, 2.0, axes, survival=False
+    )
 
 
 def gamma_ccdf_diagnostic(
-    data: pd.DataFrame,
-    claims: pd.DataFrame | None = None,
-    axes: plt.Axes | None = None,
-) -> tuple[plt.Figure, plt.Axes]:
-    """Compare the empirical severity CCDF to Gamma and Generalized-Pareto sf on log-log axes.
-
-    When ``claims`` (the per-claim DataFrame from :func:`prepare_mtpl_data`) is
-    supplied, the empirical and both fits switch to per-claim uncapped
-    ``ClaimAmount`` so the cap at ``CLAIM_CAP`` does not flatten the tail in
-    the diagnostic. With ``claims=None`` the function falls back to the
-    per-policy ``Severity`` (capped, claim-weighted) — kept for back
-    compatibility and for callers that do not have per-claim data.
-
-    The x-axis is capped at the empirical 99.5th percentile so the single
-    most expensive claim does not stretch the panel over multiple decades
-    and squash the bulk; both fitted lines are drawn only up to the same
-    cap so all three lines share the visible x-range.
-    """
-    fig, axis = _single_panel_axes(axes, (6.5, 4.5))
-    if claims is not None:
-        severity = claims["ClaimAmount"].to_numpy(dtype=float)
-        weights = np.ones_like(severity)
-        empirical_label = "Empirical (uncapped per-claim)"
-    else:
-        claim_rows = data.loc[data["ClaimNb"] > 0]
-        severity = claim_rows["Severity"].to_numpy(dtype=float)
-        weights = claim_rows["ClaimNb"].to_numpy(dtype=float)
-        empirical_label = "Empirical (per-policy avg, capped)"
-    alpha, _, beta = gamma.fit(severity, floc=0)
-    c_gp, _, scale_gp = genpareto.fit(severity, floc=0)
-    upper = float(np.quantile(severity, 0.995, weights=weights, method="inverted_cdf"))
-    empirical_x, empirical_s = weighted_empirical_ccdf(severity, weights)
-    within = empirical_x <= upper
-    empirical_x = empirical_x[within]
-    empirical_s = empirical_s[within]
-    x_grid = np.geomspace(max(severity.min(), 1.0), upper, 400)
-    theoretical_s = gamma.sf(x_grid, alpha, scale=beta)
-    gp_s = genpareto.sf(x_grid, c_gp, loc=0, scale=scale_gp)
-    axis.step(
-        empirical_x,
-        empirical_s,
-        where="post",
-        color=_EMPIRICAL_COLOR,
-        label=empirical_label,
+    data: pd.DataFrame, mean: pd.Series, dispersion: float, axes=None
+):
+    """Survival for the same capped policy averages and fitted Gamma reference as the CDF."""
+    return _conditional_diagnostic(
+        data, mean, "severity", dispersion, 2.0, axes, survival=True
     )
-    axis.plot(
-        x_grid,
-        theoretical_s,
-        color=_FIT_COLOR,
-        label=f"Gamma(α={alpha:.3f}, β={beta:.0f})",
-    )
-    axis.plot(
-        x_grid,
-        gp_s,
-        color=_FIT_COLOR_2,
-        label=f"GenPareto(c={c_gp:.3f}, scale={scale_gp:.0f})",
-    )
-    axis.set_xscale("log")
-    axis.set_yscale("log")
-    _set_log_y_observed_floor(axis, empirical_s.min())
-    _set_upper_x_bound(axis, upper)
-    axis.set_xlabel("Severity (EUR, log scale)")
-    axis.set_ylabel("CCDF (log scale)")
-    axis.set_title("Severity right tail (log-log CCDF)")
-    axis.legend()
-    fig.tight_layout()
-    return fig, axis
 
 
 def tweedie_cdf_diagnostic(
     data: pd.DataFrame,
+    mean: pd.Series,
     tweedie_power: float,
-    axes: tuple[plt.Axes, plt.Axes] | None = None,
-) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
-    """Compare the weighted empirical per-policy ClaimAmountCapped CDF to Tweedie(p, μ̂, φ̂).
-
-    The fit is profile maximum likelihood: scan over μ on the log scale, with φ
-    solved from Pearson residuals at each μ, and pick the μ that maximizes
-    glum's series-based Tweedie log-likelihood. φ̂ is re-evaluated at μ̂ for
-    the legend; matches what ``select_tweedie_power`` does internally so the
-    diagnostic is consistent with the rest of the tutorial. Falls back to
-    the moment-based estimator when MLE cannot return finite values.
-
-    The Tweedie CDF is computed by truncating the Poisson-Gamma series
-    (the standard actuarial approach; ``scipy.stats.tweedie`` is not exposed in
-    the locked scipy build).
-    """
-    fig, axes = _cdf_diagnostic_axes(axes, (11.0, 4.5))
-    amounts = data["ClaimAmountCapped"].to_numpy(dtype=float)
-    weights = data["Exposure"].to_numpy(dtype=float)
-    mu, phi = _fit_tweedie_mle(amounts, tweedie_power, weights)
-    empirical_x, empirical_f = weighted_empirical_cdf(amounts, weights)
-    x_grid = np.linspace(0.0, max(amounts.max(), 1.0), 400)
-    theoretical_f = tweedie_cdf_series(x_grid, mu, phi, tweedie_power)
-    for axis, log_y in zip(axes, (False, True)):
-        axis.step(
-            empirical_x,
-            empirical_f,
-            where="post",
-            color=_EMPIRICAL_COLOR,
-            label="Empirical",
-        )
-        axis.plot(
-            x_grid,
-            theoretical_f,
-            color=_FIT_COLOR,
-            label=f"Tweedie(p={tweedie_power:.1f}, μ={mu:.2f}, φ={phi:.2f})",
-        )
-        axis.set_xlabel("ClaimAmountCapped (EUR)")
-        axis.set_ylabel("CDF")
-        axis.set_title("Pure premium" + (" (log-y)" if log_y else " (linear)"))
-        if log_y:
-            axis.set_yscale("log")
-            _set_log_y_observed_floor(axis, empirical_f.min(), factor=10.0)
-        axis.legend()
-    fig.tight_layout()
-    return fig, axes
+    dispersion: float,
+    axes=None,
+):
+    """Exposure-weighted capped totals; mean=e*rate, dispersion=phi*e**(1-p)."""
+    return _conditional_diagnostic(
+        data, mean, "pure_premium", dispersion, tweedie_power, axes, survival=False
+    )
 
 
 def tweedie_ccdf_diagnostic(
     data: pd.DataFrame,
+    mean: pd.Series,
     tweedie_power: float,
-    axes: plt.Axes | None = None,
-) -> tuple[plt.Figure, plt.Axes]:
-    """Compare the weighted empirical per-policy CCDF to 1 − Tweedie(p, μ̂, φ̂) on log-log axes.
+    dispersion: float,
+    axes=None,
+):
+    """Survival for the same capped policy totals and fitted Tweedie reference as the CDF."""
+    return _conditional_diagnostic(
+        data, mean, "pure_premium", dispersion, tweedie_power, axes, survival=True
+    )
 
-    The empirical uses ``ClaimAmountOriginal`` (per-policy uncapped aggregate,
-    exposure-weighted) rather than ``ClaimAmountCapped`` so the cap at
-    ``CLAIM_CAP`` does not flatten the tail in the diagnostic. The x-axis is
-    cropped to the positive support (1st positive percentile and 99.5th
-    percentile of the positive empirical mass) so log-x succeeds and the
-    small-mass extreme does not stretch the panel; the zero-mass step the
-    linear CDF panel documents is dropped here. The (μ̂, φ̂) fit is profile MLE
-    (see :func:`tweedie_cdf_diagnostic` for details); the log-y lower bound
-    uses one decade of headroom instead of two because the Tweedie CCDF decays
-    faster than the Gamma one on this data and the extra empty space below
-    doesn't carry diagnostic signal.
-    """
-    fig, axis = _single_panel_axes(axes, (6.5, 4.5))
-    amounts = data["ClaimAmountOriginal"].to_numpy(dtype=float)
-    weights = data["Exposure"].to_numpy(dtype=float)
-    mu, phi = _fit_tweedie_mle(amounts, tweedie_power, weights)
-    positive = amounts > 0
-    positive_x = amounts[positive]
-    positive_w = weights[positive]
-    quantiles = np.quantile(
-        positive_x, [0.01, 0.995], weights=positive_w, method="inverted_cdf"
+
+def _tweedie_probability_series(
+    x: np.ndarray,
+    mu: float | np.ndarray,
+    phi: float | np.ndarray,
+    tweedie_power: float,
+    max_terms: int,
+    tol: float,
+    *,
+    survival: bool,
+) -> np.ndarray:
+    """Sum conditional Gamma probabilities with an omitted-Poisson-mass bound."""
+    if not (1 < tweedie_power < 2):
+        raise ValueError("tweedie_power must lie in (1, 2)")
+    if not isinstance(max_terms, (int, np.integer)) or max_terms < 1:
+        raise ValueError("max_terms must be a positive integer")
+    if not np.isfinite(tol) or not (0 < tol < 1):
+        raise ValueError("tol must lie in (0, 1)")
+    x_arr, mu_arr, phi_arr = np.broadcast_arrays(
+        np.atleast_1d(np.asarray(x, dtype=float)),
+        np.asarray(mu, dtype=float),
+        np.asarray(phi, dtype=float),
     )
-    lower, upper = float(quantiles[0]), float(quantiles[1])
-    empirical_x, empirical_s = weighted_empirical_ccdf(amounts, weights)
-    within = (empirical_x >= lower) & (empirical_x <= upper)
-    empirical_x = empirical_x[within]
-    empirical_s = empirical_s[within]
-    x_grid = np.geomspace(lower, upper, 400)
-    theoretical_s = tweedie_sf_series(x_grid, mu, phi, tweedie_power)
-    axis.step(
-        empirical_x,
-        empirical_s,
-        where="post",
-        color=_EMPIRICAL_COLOR,
-        label="Empirical (per-policy uncapped)",
-    )
-    axis.plot(
-        x_grid,
-        theoretical_s,
-        color=_FIT_COLOR,
-        label=f"Tweedie(p={tweedie_power:.1f}, μ={mu:.2f}, φ={phi:.2f})",
-    )
-    axis.set_xscale("log")
-    axis.set_yscale("log")
-    _set_log_y_observed_floor(axis, empirical_s.min(), factor=10.0)
-    _set_upper_x_bound(axis, upper)
-    axis.set_xlabel("ClaimAmountOriginal (EUR, log scale)")
-    axis.set_ylabel("CCDF (log scale)")
-    axis.set_title("Pure premium right tail (log-log CCDF)")
-    axis.legend()
-    fig.tight_layout()
-    return fig, axis
+    if np.any(np.isnan(x_arr)):
+        raise ValueError("x must not contain NaN")
+    if np.any(~np.isfinite(mu_arr) | (mu_arr <= 0)) or np.any(
+        ~np.isfinite(phi_arr) | (phi_arr <= 0)
+    ):
+        raise ValueError("mu and phi must be finite and positive")
+    p = tweedie_power
+    alpha = (2 - p) / (p - 1)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        beta = phi_arr * (p - 1) * mu_arr ** (p - 1)
+        lam = mu_arr ** (2 - p) / (phi_arr * (2 - p))
+    if np.any(~np.isfinite(beta) | (beta <= 0)) or np.any(
+        ~np.isfinite(lam) | (lam <= 0)
+    ):
+        raise ValueError(
+            "compound Poisson-Gamma parameters must be finite and positive"
+        )
+    result = np.zeros(x_arr.shape)
+    result[x_arr < 0] = float(survival)
+    result[np.isposinf(x_arr)] = float(not survival)
+    zero = x_arr == 0
+    result[zero] = -np.expm1(-lam[zero]) if survival else np.exp(-lam[zero])
+    active = np.isfinite(x_arr) & (x_arr > 0)
+    if not survival:
+        result[active] = np.exp(-lam[active])
+    gamma_probability = gamma.sf if survival else gamma.cdf
+    for k in range(1, max_terms + 1):
+        if not np.any(active):
+            return result
+        intensity = lam[active]
+        threshold = x_arr[active]
+        scale = beta[active]
+        result[active] += np.exp(poisson.logpmf(k, intensity)) * gamma_probability(
+            threshold, a=k * alpha, scale=scale
+        )
+        log_remainder = poisson.logsf(k, intensity)
+        if not survival:
+            # Gamma CDFs decrease with k, tightening the omitted-mass bound.
+            log_remainder += gamma.logcdf(threshold, a=(k + 1) * alpha, scale=scale)
+        with np.errstate(divide="ignore"):
+            log_target = np.log(tol) + np.log(result[active])
+        # A zero sum can stop only when the bound is below float representation.
+        log_target = np.where(
+            result[active] > 0, log_target, np.log(np.nextafter(0.0, 1.0))
+        )
+        active[active] = log_remainder > log_target
+    if np.any(active):
+        raise RuntimeError(
+            f"Tweedie probability series did not converge in {max_terms} terms"
+        )
+    return result
 
 
 def tweedie_cdf_series(
     x: np.ndarray,
-    mu: float,
-    phi: float,
+    mu: float | np.ndarray,
+    phi: float | np.ndarray,
     tweedie_power: float,
-    max_terms: int = 200,
+    max_terms: int = 10_000,
     tol: float = 1e-10,
 ) -> np.ndarray:
-    """Compute the compound Poisson-Gamma Tweedie CDF by truncating its series.
+    """Return P(Y <= x), including the compound Poisson mass at zero.
 
-    For ``1 < p < 2`` the Tweedie compound distribution has the series form
-
-    .. math::
-
-        F(y) = e^{-\\lambda} \\sum_{k=0}^{\\infty}
-            \\frac{\\lambda^k}{k!} G(y; k\\alpha, \\beta),
-
-    with ``alpha = (2-p)/(p-1)``, ``beta = phi * (p-1) * mu ** (p-1)`` and
-    ``lambda = mu ** (2-p) / (phi * (2-p))``. The Poisson weights decay
-    geometrically past ``k = lambda`` so the series converges in a few dozen
-    terms for typical actuarial data; we stop when the largest per-term
-    contribution drops below ``tol``.
+    Inputs broadcast together. Sum Poisson log-PMF weights times Gamma CDFs
+    until the omitted probability is at most ``tol`` times the partial sum.
+    Raise if ``max_terms`` is exhausted before convergence.
     """
-    if not (1 < tweedie_power < 2):
-        raise ValueError("tweedie_power must lie in (1, 2)")
-    if mu <= 0 or phi <= 0:
-        raise ValueError("mu and phi must be positive")
-    alpha = (2 - tweedie_power) / (tweedie_power - 1)
-    beta = phi * (tweedie_power - 1) * mu ** (tweedie_power - 1)
-    lam = mu ** (2 - tweedie_power) / (phi * (2 - tweedie_power))
-    zero_mass = float(np.exp(-lam))
-    x_arr = np.atleast_1d(np.asarray(x, dtype=float))
-    result = np.where(x_arr <= 0, 0.0, zero_mass)
-    positive = x_arr > 0
-    if not np.any(positive):
-        return result
-    poisson_term = zero_mass
-    for k in range(1, max_terms + 1):
-        poisson_term *= lam / k
-        contribution = poisson_term * gamma.cdf(
-            np.maximum(x_arr[positive], 1e-300), a=k * alpha, scale=beta
-        )
-        result = result.copy()
-        result[positive] += contribution
-        if float(np.max(contribution)) < tol:
-            break
-    return result
+    return _tweedie_probability_series(
+        x, mu, phi, tweedie_power, max_terms, tol, survival=False
+    )
 
 
 def tweedie_sf_series(
     x: np.ndarray,
-    mu: float,
-    phi: float,
+    mu: float | np.ndarray,
+    phi: float | np.ndarray,
     tweedie_power: float,
-    max_terms: int = 200,
+    max_terms: int = 10_000,
     tol: float = 1e-10,
 ) -> np.ndarray:
-    """Compute the compound Poisson-Gamma Tweedie survival function 1 − F by series truncation.
+    """Return P(Y > x) by summing Gamma survival probabilities directly.
 
-    Same convergence guarantee as ``tweedie_cdf_series``; computes 1 − F by
-    subtracting ``gamma.cdf`` terms from ``1 − zero_mass``. Mathematically
-    equivalent to summing ``poisson_term · gamma.sf``, kept as ``1 − ...``
-    so the loop shares its structure with ``tweedie_cdf_series``. The trailing
-    ``np.maximum(result, 0.0)`` clamps sub-epsilon cancellation noise.
+    Inputs broadcast together. The omitted Poisson mass bounds the error
+    relative to the partial sum, including tiny tails. No CDF subtraction or
+    probability floor is used; unachieved convergence raises RuntimeError.
     """
-    if not (1 < tweedie_power < 2):
+    return _tweedie_probability_series(
+        x, mu, phi, tweedie_power, max_terms, tol, survival=True
+    )
+
+
+def conditional_dispersion_table(
+    data: pd.DataFrame, mean: pd.Series, by: str, response: str, tweedie_power: float
+) -> pd.DataFrame:
+    """Report fixed-power residual dispersion, dividing by row count, not risk volume."""
+    target, prediction, weight = _diagnostic_inputs(data, mean, response)
+    power = {"frequency": 1.0, "severity": 2.0, "pure_premium": tweedie_power}[response]
+    if response == "pure_premium" and not 1 < power < 2:
         raise ValueError("tweedie_power must lie in (1, 2)")
-    if mu <= 0 or phi <= 0:
-        raise ValueError("mu and phi must be positive")
-    alpha = (2 - tweedie_power) / (tweedie_power - 1)
-    beta = phi * (tweedie_power - 1) * mu ** (tweedie_power - 1)
-    lam = mu ** (2 - tweedie_power) / (phi * (2 - tweedie_power))
-    zero_mass = float(np.exp(-lam))
-    x_arr = np.atleast_1d(np.asarray(x, dtype=float))
-    result = np.where(x_arr <= 0, 1.0, 1.0 - zero_mass)
-    positive = x_arr > 0
-    if not np.any(positive):
-        return result
-    poisson_term = zero_mass
-    for k in range(1, max_terms + 1):
-        poisson_term *= lam / k
-        contribution = poisson_term * gamma.cdf(
-            np.maximum(x_arr[positive], 1e-300), a=k * alpha, scale=beta
-        )
-        result = result.copy()
-        result[positive] -= contribution
-        if float(np.max(contribution)) < tol:
-            break
-    return np.maximum(result, 0.0)
-
-
-_INITIAL_VARIANCE_POWER = {"frequency": 1.0, "severity": 2.0, "pure_premium": 1.5}
-
-
-def mean_variance_table(
-    data: pd.DataFrame, by: str, response: str
-) -> tuple[pd.DataFrame, float, float]:
-    """Group by ``by``, compute the weighted mean and variance of ``response`` per group.
-
-    Returns the per-group table plus the fitted ``(p, φ)`` of the power-law
-    variance function ``Var ≈ φ · mean^p``. The fit uses ``scipy.optimize.curve_fit``
-    starting from the canonical power for the chosen response.
-    """
-    rows, target, weight = target_and_weight(data, response)
-    frame = rows.assign(target=target, weight=weight).rename(columns={by: "_group"})
-    grouped = frame.groupby("_group", observed=True)
-
-    def _aggregate(group: pd.DataFrame) -> pd.Series:
-        weights = group["weight"].to_numpy(dtype=float)
-        target = group["target"].to_numpy(dtype=float)
-        mean = float(np.average(target, weights=weights))
-        variance = float(np.average((target - mean) ** 2, weights=weights))
-        return pd.Series({"n": len(group), "mean": mean, "variance": variance})
-
-    table = grouped.apply(_aggregate, include_groups=False).reset_index()
-    mean_values = table["mean"].to_numpy(dtype=float)
-    variance_values = table["variance"].to_numpy(dtype=float)
-    initial_p = _INITIAL_VARIANCE_POWER[response]
-    initial_phi = (
-        float(np.mean(variance_values) / np.mean(mean_values) ** initial_p)
-        if np.all(mean_values > 0)
-        else 1.0
+    frame = pd.DataFrame(
+        {
+            by: data[by],
+            "risk_volume": weight,
+            "observed_rate": weight * target,
+            "predicted_rate": weight * prediction,
+            "dispersion": weight * (target - prediction) ** 2 / prediction**power,
+        }
     )
-    (p_fit, phi_fit), _ = curve_fit(
-        lambda mean, p, phi: phi * np.maximum(mean, 1e-12) ** p,
-        mean_values,
-        variance_values,
-        p0=[initial_p, initial_phi],
-    )
-    return table, float(p_fit), float(phi_fit)
+    grouped = frame.groupby(by, observed=True, sort=True, dropna=False)
+    table = grouped.sum()
+    table.insert(0, "n", grouped.size())
+    table[["observed_rate", "predicted_rate"]] = table[
+        ["observed_rate", "predicted_rate"]
+    ].div(table["risk_volume"], axis=0)
+    table["dispersion"] /= table["n"]
+    return table.reset_index()
 
 
-def mean_variance_diagnostic(
+def conditional_dispersion_diagnostic(
     data: pd.DataFrame,
+    predictions: dict[str, pd.Series],
     by: str,
     tweedie_power: float,
-    axes: tuple[plt.Axes, plt.Axes, plt.Axes] | None = None,
-) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes, plt.Axes]]:
-    """Plot empirical (μ, σ²) per group and the fitted power-law variance function.
-
-    The pure-premium panel uses ``tweedie_power`` only as the legend label and the
-    starting point of the curve fit; the fitted ``p`` is what the data says.
-    """
-    responses = ("frequency", "severity", "pure_premium")
-    titles = {
-        "frequency": "Frequency",
-        "severity": "Severity",
-        "pure_premium": "Pure premium",
-    }
+    dispersions: dict[str, float],
+    axes=None,
+):
+    """Compare grouped training residual dispersion with fixed family references."""
     if axes is None:
         fig, axes = plt.subplots(1, 3, figsize=(15.0, 4.5))
     else:
         fig = axes[0].figure
-    for axis, response in zip(axes, responses):
-        table, p, phi = mean_variance_table(data, by, response)
+    for axis, component in zip(axes, TARGET_SPECS, strict=True):
+        rows, _, _ = target_and_weight(data, component)
+        table = conditional_dispersion_table(
+            rows, predictions[component], by, component, tweedie_power
+        )
+        reference = 1.0 if component == "frequency" else dispersions[component]
+        if not np.isfinite(reference) or reference <= 0:
+            raise ValueError("dispersion must be finite and positive")
+        x = np.arange(len(table))
         axis.scatter(
-            table["mean"],
-            table["variance"],
-            color="black",
-            label=f"Empirical ({len(table)} groups)",
+            x, table["dispersion"], color=_EMPIRICAL_COLOR, label="Residual dispersion"
         )
-        positive_mean = table["mean"][table["mean"] > 0]
-        x_grid = np.linspace(
-            max(positive_mean.min(), 1e-12),
-            positive_mean.max() * 1.5,
-            100,
+        axis.axhline(
+            reference, color=_FIT_COLOR, ls="--", label=f"Reference: {reference:.3g}"
         )
-        axis.plot(
-            x_grid,
-            phi * x_grid**p,
-            "--",
-            label=f"Fit: Var ≈ {phi:.3g} · μ^{p:.2f}",
-        )
-        axis.set_xlabel(f"Mean of {titles[response]}")
-        axis.set_ylabel(f"Variance of {titles[response]}")
-        title = f"{titles[response]} by {by}"
-        if response == "pure_premium":
-            title = f"{title} (Tweedie p = {tweedie_power:.1f})"
-        axis.set_title(title)
+        axis.set_xticks(x, table[by].astype(str))
+        axis.set_xlabel(by)
+        axis.set_ylabel("Mean scaled residual square")
+        axis.set_title(f"{component.replace('_', ' ').title()} (n={len(rows):,})")
         axis.legend()
     fig.tight_layout()
     return fig, axes
@@ -1012,6 +953,98 @@ def coefficient_relativity_table(
     return table
 
 
+def tweedie_log_likelihood(
+    y: np.ndarray,
+    mean: np.ndarray,
+    exposure: np.ndarray,
+    tweedie_power: float,
+    dispersion: float,
+) -> float:
+    """Sum log f_p(y_i; mean_i, dispersion / exposure_i) for rate targets.
+
+    Scale each rate and mean by a_i = exposure_i ** (1 / (2 - p)) so GLUM
+    can evaluate all rows with one scalar dispersion and unit likelihood
+    weights. Only positive observations receive the log(a_i) Jacobian;
+    zero observations retain their discrete probability mass.
+    """
+    if not (1 < tweedie_power < 2):
+        raise ValueError("tweedie_power must lie in (1, 2)")
+    y, mean, exposure = (np.asarray(v, dtype=float) for v in (y, mean, exposure))
+    if y.ndim != 1 or y.size == 0 or y.shape != mean.shape or y.shape != exposure.shape:
+        raise ValueError("y, mean and exposure must be aligned nonempty 1D arrays")
+    if np.any(~np.isfinite(y) | (y < 0)):
+        raise ValueError("y must be finite and nonnegative")
+    if (
+        np.any(~np.isfinite(mean) | (mean <= 0))
+        or np.any(~np.isfinite(exposure) | (exposure <= 0))
+        or not np.isfinite(dispersion)
+        or dispersion <= 0
+    ):
+        raise ValueError("mean, exposure and dispersion must be finite and positive")
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        log_scale = np.log(exposure) / (2 - tweedie_power)
+        scale = np.exp(log_scale)
+        scaled_y, scaled_mean = scale * y, scale * mean
+    if (
+        np.any(~np.isfinite(scale) | (scale <= 0))
+        or np.any(~np.isfinite(scaled_mean) | (scaled_mean <= 0))
+        or np.any(~np.isfinite(scaled_y) | ((y > 0) & (scaled_y <= 0)))
+    ):
+        raise ValueError("exposure scaling produced invalid transformed values")
+    likelihood = (
+        TweedieDistribution(tweedie_power).log_likelihood(
+            scaled_y,
+            scaled_mean,
+            sample_weight=np.ones_like(y),
+            dispersion=float(dispersion),
+        )
+        + log_scale[y > 0].sum()
+    )
+    if not np.isfinite(likelihood):
+        raise RuntimeError("Tweedie likelihood produced a non-finite value")
+    return float(likelihood)
+
+
+def fit_tweedie_dispersion(
+    y: np.ndarray,
+    mean: np.ndarray,
+    exposure: np.ndarray,
+    tweedie_power: float,
+) -> float:
+    """Fit base dispersion by rate likelihood, keeping predicted means fixed.
+
+    The mean exposure-adjusted Pearson residual square is only a starting
+    estimate. Optimize log dispersion and raise on failure; no moment fallback.
+    """
+    y, mean, exposure = (np.asarray(v, dtype=float) for v in (y, mean, exposure))
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        start = float(np.mean(exposure * (y - mean) ** 2 / mean**tweedie_power))
+    if not np.isfinite(start) or start <= 0 or not np.any(y > 0):
+        raise ValueError(
+            "dispersion fitting needs positive loss and a positive finite start"
+        )
+
+    def objective(log_dispersion: float) -> float:
+        with np.errstate(over="ignore", under="ignore"):
+            dispersion = float(np.exp(log_dispersion))
+        if not np.isfinite(dispersion) or dispersion <= 0:
+            return float("inf")
+        return -tweedie_log_likelihood(y, mean, exposure, tweedie_power, dispersion)
+
+    log_start = np.log(start)
+    result = minimize_scalar(objective, bracket=(log_start - np.log(2), log_start))
+    with np.errstate(over="ignore", under="ignore"):
+        dispersion = float(np.exp(result.x))
+    if (
+        not result.success
+        or not np.isfinite(result.fun)
+        or not np.isfinite(dispersion)
+        or dispersion <= 0
+    ):
+        raise RuntimeError(f"Tweedie dispersion optimization failed: {result.message}")
+    return dispersion
+
+
 def select_tweedie_power(
     development_train: pd.DataFrame,
     development_validation: pd.DataFrame,
@@ -1035,17 +1068,9 @@ def select_tweedie_power(
         ).fit(train_rows, y_train, sample_weight=w_train)
         train_prediction = model.predict(train_rows)
         validation_prediction = model.predict(validation_rows)
-        dispersion = family.dispersion(
-            y_train,
-            train_prediction,
-            sample_weight=w_train,
-            ddof=len(model.coef_) + 1,
-        )
-        log_likelihood = family.log_likelihood(
-            y_validation,
-            validation_prediction,
-            sample_weight=w_validation,
-            dispersion=dispersion,
+        dispersion = fit_tweedie_dispersion(y_train, train_prediction, w_train, power)
+        log_likelihood = tweedie_log_likelihood(
+            y_validation, validation_prediction, w_validation, power, dispersion
         )
         results.append(
             {
@@ -1343,17 +1368,39 @@ def exposure_balanced_lift_table(
     exposure: np.ndarray,
     n_bins: int = 10,
 ) -> pd.DataFrame:
-    """Aggregate lift at exactly equal exposure boundaries, splitting boundary rows."""
+    """Aggregate tied scores first, then split blocks across equal-exposure bins."""
     y_true_rate = np.asarray(y_true_rate, dtype=float)
     y_pred_rate = np.asarray(y_pred_rate, dtype=float)
     exposure = np.asarray(exposure, dtype=float)
-    if n_bins < 1 or np.any(exposure <= 0):
-        raise ValueError("n_bins and exposure must be positive")
+    if not isinstance(n_bins, (int, np.integer)) or n_bins < 1:
+        raise ValueError("n_bins must be a positive integer")
+    if (
+        exposure.ndim != 1
+        or exposure.size == 0
+        or any(values.shape != exposure.shape for values in (y_true_rate, y_pred_rate))
+    ):
+        raise ValueError("rates and exposure must be aligned nonempty 1D arrays")
+    if not np.all(np.isfinite(exposure) & (exposure > 0)) or not np.isfinite(
+        exposure.sum()
+    ):
+        raise ValueError("exposure must be finite and positive")
+    if any(
+        np.any(~np.isfinite(values) | (values < 0))
+        for values in (y_true_rate, y_pred_rate)
+    ):
+        raise ValueError("rates must be finite and nonnegative")
 
     order = np.argsort(y_pred_rate, kind="stable")
-    cumulative_exposure = np.r_[0.0, np.cumsum(exposure[order])]
-    cumulative_observed = np.r_[0.0, np.cumsum(exposure[order] * y_true_rate[order])]
-    cumulative_predicted = np.r_[0.0, np.cumsum(exposure[order] * y_pred_rate[order])]
+    _, starts = np.unique(y_pred_rate[order], return_index=True)
+    cumulative_exposure = np.r_[
+        0.0, np.cumsum(np.add.reduceat(exposure[order], starts))
+    ]
+    cumulative_observed = np.r_[
+        0.0, np.cumsum(np.add.reduceat(exposure[order] * y_true_rate[order], starts))
+    ]
+    cumulative_predicted = np.r_[
+        0.0, np.cumsum(np.add.reduceat(exposure[order] * y_pred_rate[order], starts))
+    ]
     boundaries = np.linspace(0, cumulative_exposure[-1], n_bins + 1)
     observed = np.interp(boundaries, cumulative_exposure, cumulative_observed)
     predicted = np.interp(boundaries, cumulative_exposure, cumulative_predicted)
@@ -1375,27 +1422,48 @@ def exposure_balanced_double_lift_table(
     exposure: np.ndarray,
     n_bins: int = 10,
 ) -> pd.DataFrame:
-    """Bin observed rates by the low-to-high model-A/model-B prediction ratio."""
+    """Bin low-to-high A/B ratios, distributing tied blocks proportionally."""
     y_true_rate = np.asarray(y_true_rate, dtype=float)
     model_a_prediction = np.asarray(model_a_prediction, dtype=float)
     model_b_prediction = np.asarray(model_b_prediction, dtype=float)
     exposure = np.asarray(exposure, dtype=float)
-    if n_bins < 1:
-        raise ValueError("n_bins must be at least 1")
-    if not np.all(np.isfinite(exposure) & (exposure > 0)):
+    if not isinstance(n_bins, (int, np.integer)) or n_bins < 1:
+        raise ValueError("n_bins must be a positive integer")
+    if (
+        exposure.ndim != 1
+        or exposure.size == 0
+        or any(
+            values.shape != exposure.shape
+            for values in (y_true_rate, model_a_prediction, model_b_prediction)
+        )
+    ):
+        raise ValueError("rates and exposure must be aligned nonempty 1D arrays")
+    if np.any(~np.isfinite(y_true_rate) | (y_true_rate < 0)):
+        raise ValueError("observed rates must be finite and nonnegative")
+    if not np.all(np.isfinite(exposure) & (exposure > 0)) or not np.isfinite(
+        exposure.sum()
+    ):
         raise ValueError("exposure must be finite and positive")
     if not np.all(np.isfinite(model_a_prediction) & (model_a_prediction > 0)):
         raise ValueError("model_a_prediction must be finite and positive")
     if not np.all(np.isfinite(model_b_prediction) & (model_b_prediction > 0)):
         raise ValueError("model_b_prediction must be finite and positive")
-    ratio = model_a_prediction / model_b_prediction
+    with np.errstate(over="ignore", under="ignore"):
+        ratio = model_a_prediction / model_b_prediction
+    if np.any(~np.isfinite(ratio) | (ratio <= 0)):
+        raise ValueError("prediction ratios must be finite and positive")
     order = np.argsort(ratio, kind="stable")
-    cumulative_exposure = np.r_[0.0, np.cumsum(exposure[order])]
+    _, starts = np.unique(ratio[order], return_index=True)
+    cumulative_exposure = np.r_[
+        0.0, np.cumsum(np.add.reduceat(exposure[order], starts))
+    ]
     boundaries = np.linspace(0, cumulative_exposure[-1], n_bins + 1)
     bin_exposure = np.diff(boundaries)
 
     def rates(values: np.ndarray) -> np.ndarray:
-        cumulative = np.r_[0.0, np.cumsum(exposure[order] * values[order])]
+        cumulative = np.r_[
+            0.0, np.cumsum(np.add.reduceat(exposure[order] * values[order], starts))
+        ]
         return (
             np.diff(np.interp(boundaries, cumulative_exposure, cumulative))
             / bin_exposure
@@ -1488,12 +1556,10 @@ def grouped_calibration(
     """Aggregate observed and predicted component rates by driver-age bands."""
     rows, target, weight = target_and_weight(data, component)
     bands = pd.qcut(rows["DrivAge"], n_bins, duplicates="drop")
-    frame = pd.DataFrame(
-        {"band": bands.astype(str), "weight": weight, "observed": target * weight}
-    )
+    frame = pd.DataFrame({"band": bands, "weight": weight, "observed": target * weight})
     for name, prediction in predictions.items():
         frame[name] = np.asarray(prediction) * weight
-    grouped = frame.groupby("band", sort=False, observed=True).sum()
+    grouped = frame.groupby("band", sort=True, observed=True).sum()
     rate_columns = ["observed", *predictions]
     grouped[rate_columns] = grouped[rate_columns].div(grouped["weight"], axis=0)
     return grouped
@@ -1535,6 +1601,7 @@ def save_core_figures(
                 xlabel="Driver-age band",
                 ylabel="Rate",
             )
+            axis.set_xticks(x, calibration.index.astype(str), rotation=45, ha="right")
             axis.legend()
         fig.tight_layout()
         fig.savefig(output_dir / "component_calibration.png", dpi=150)
@@ -1641,7 +1708,7 @@ def hexbin_grid(
 
     ``extent_mode`` clips hexbinning (and the axis limits) to the predicted-value
     span when the panel is linear:
-    - ``"diag"`` uses ``(xmin, xmax)`` on both axes (predicted vs observed).
+    - ``"diag"`` uses the predicted span on x and includes zero on observed y.
     - ``"residual"`` uses ``(xmin, xmax)`` on x and the symmetric predicted span
       on y (residual panel).
     - ``"auto"`` leaves hexbinning and limits alone (log panels).
@@ -1649,9 +1716,31 @@ def hexbin_grid(
     fig, axes = plt.subplots(2, 2, figsize=(13, 9))
     artists = []
     for axis, (name, (x, y)) in zip(axes.flat, xy_by_model.items()):
+        x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        if x.ndim != 1 or x.shape != y.shape:
+            raise ValueError("x and y must be aligned 1D arrays")
+        visible = np.isfinite(x) & np.isfinite(y)
+        if logx:
+            visible &= x > 0
+        if logy:
+            visible &= y > 0
+        x, y = x[visible], y[visible]
+        axis.set_title(name)
+        axis.set_xlabel(xlabel)
+        axis.set_ylabel(ylabel)
+        axis.set_xscale("log" if logx else "linear")
+        axis.set_yscale("log" if logy else "linear")
+        if x.size == 0:
+            axis.text(
+                0.5, 0.5, "No eligible policies", transform=axis.transAxes, ha="center"
+            )
+            continue
         xlo, xhi = float(x.min()), float(x.max())
+        if xlo == xhi:
+            padding = max(abs(xlo) * 0.05, 0.5)
+            xlo, xhi = xlo - padding, xhi + padding
         if extent_mode == "diag" and not logx and not logy:
-            ylo, yhi = xlo, xhi
+            ylo, yhi = min(0.0, xlo), max(0.0, xhi)
             extent = (xlo, xhi, ylo, yhi)
         elif extent_mode == "residual" and not logx and not logy:
             span = xhi - xlo
@@ -1684,17 +1773,34 @@ def hexbin_grid(
         if extent is not None:
             axis.set_xlim(extent[0], extent[1])
             axis.set_ylim(extent[2], extent[3])
-    vmax = max(float(artist.get_array().max()) for artist in artists)
+    for axis in list(axes.flat)[len(xy_by_model) :]:
+        axis.set_visible(False)
+    vmax = max(
+        (
+            float(artist.get_array().max())
+            for artist in artists
+            if artist.get_array().size
+        ),
+        default=1.0,
+    )
+    norm = mcolors.LogNorm(1.0, max(2.0, vmax))
     for artist in artists:
-        artist.set_norm(mcolors.LogNorm(1.0, vmax))
-    colorbar = fig.colorbar(artists[0], ax=axes, fraction=0.03)
-    colorbar.set_label("policies per bin")
+        artist.set_norm(norm)
+    if artists:
+        colorbar = fig.colorbar(artists[0], ax=axes, fraction=0.03)
+        colorbar.set_label("policies per bin")
     plt.show()
+    return fig, axes
 
 
 def print_frame(title: str, frame: pd.DataFrame) -> None:
     """Render every tutorial table through the shared Rich console."""
-    shown = frame.reset_index() if frame.index.name is not None else frame
+    shown = (
+        frame.reset_index()
+        if frame.index.name is not None
+        or not frame.index.equals(pd.RangeIndex(len(frame)))
+        else frame
+    )
     table = Table(title=title, show_lines=False)
     for column in shown.columns:
         table.add_column(
