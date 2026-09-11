@@ -1,11 +1,12 @@
 # Conditional diagnostics and chapter repair
 
-Updated: 2026-09-07.
+Updated: 2026-09-11.
 
 Read [PROGRESS.md](PROGRESS.md) for the handoff. Phases 1, 2, and 3 are
-implemented and verified. The subsequent user-approved phase adds uncapped
-exploration before fitting, as scoped below. Preserve earlier work; stop for
-review after this phase and do not publish.
+implemented and verified, along with the subsequent repairs recorded below.
+The latest request has two editorial phases: common-English wording and
+precision, then learning-path improvements. Both editorial phases are now
+implemented and verified. Stop for review; do not publish.
 
 ## Constraints
 
@@ -391,3 +392,56 @@ the contrast.
 No Python cell, library, API, figure, or frozen-output change. Prose between
 unchanged cells does not alter outputs, so no re-render. Acceptance: full
 tests, Ruff checks, diff whitespace check excluding the pre-existing PDF.
+
+## Editorial repair (2026-09-11)
+
+Implement one phase per session. Preserve the practical voice, mathematical
+assumptions, recorded results, and concrete counterexamples. These editorial
+phases are separate from the earlier diagnostic remediation phases.
+
+### Editorial Phase 1: Common-English wording and precision
+
+Status: implemented and verified; stopped for review.
+
+- Edit chapter prose in place using the no-ai-slop skill. Correct the
+  portfolio averages: exposure weights for frequency and pure premium,
+  claim-count weights for severity, with explicit numerators and denominators.
+- Explain that exploration estimates shared means and Gamma dispersion;
+  later GLUM means vary with policy characteristics.
+- Define specialist terms and local notation, including base dispersion,
+  risk volume, NB2, area residual dispersion, and the constant-mean D2 baseline.
+- Split overloaded paragraphs and trim repeated instructions, decorative
+  emphasis, and duplicated target/double-lift mechanics.
+- Preserve all fenced content and its order, displayed equations, recorded
+  numbers, the two-policy Gini and double-lift examples, and the claim-free
+  residual explanation. Keep the current headings and modelling sequence.
+
+Acceptance: review the edited prose against the no-ai-slop evaluation
+checklist; compare fenced blocks byte-for-byte with the pre-edit version;
+parse every Python cell; check headings, links, callouts, mathematical
+structure, and preserved examples. Run the existing tests, Ruff checks, and
+`git diff --check`. Update PROGRESS.md and stop for review. No computation
+or frozen-output refresh is needed for this prose-only phase.
+
+### Editorial Phase 2: Improve the learning path
+
+Status: implemented and verified; stopped for review. See PROGRESS.md for
+fresh full-data execution and rendered-output checks.
+
+- Open with the pricing question and four estimates, linking to the existing
+  target-and-weight table. Add a short reading guide for junior and experienced
+  readers.
+- Before the first evaluation table, give a compact guide to every measure,
+  its direction, and its limitation. Build on Phase 1's short definitions.
+- Introduce difficult formulas with their purpose and nearby symbol
+  definitions; keep derivations and implementation mechanics in collapsed
+  callouts. Preserve the current modelling sequence.
+- Put each result interpretation beside its table or chart, explaining the
+  plotted quantity and weights before the observed pattern.
+- Consolidate the ending around the recorded findings and one decision
+  checklist. Move unique teaching material, including the Gini transformation
+  example, to the relevant section; preserve the concrete counterexamples.
+
+Acceptance: validate heading links, mathematics, callouts, and rendered
+reading order. If executable cells move, verify their dependencies and
+refresh affected outputs. Record validation in PROGRESS.md and stop for review.

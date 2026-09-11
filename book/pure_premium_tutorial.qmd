@@ -2,18 +2,27 @@
 title: "Pure-Premium Tutorial"
 ---
 
-Run the cells in order. This companion to the library module uses the same
-tested functions and explains each pricing decision. The full freMTPL2 run
-can take a while; use a small sample to check that the notebook works, and
-the full data for actuarial conclusions.
+We estimate the expected claim cost per year of cover for a policy: its
+pure premium. We compare two approaches, predicted frequency multiplied by
+predicted average claim amount, and a direct Tweedie prediction. Fitting
+both with GLUM and LightGBM gives four estimates for the same test policies.
 
-The walk: prepare and split, explore uncapped training outcomes, select
-Tweedie power, fit GLUM, check working distributions on training rows, fit
-LightGBM, then score four pure-premium predictions on the locked test set.
+If you are new to pricing models, start with the
+[targets and weights](index.qmd#targets-and-weights), then read in order.
+We prepare and split the data, explore uncapped training outcomes, select
+Tweedie power, fit GLUM, check its working distributions, fit LightGBM,
+and evaluate the four estimates. The collapsed “Look inside” notes explain
+the mathematics and library functions in more detail.
 
-The chapter calls library functions for fitting, tuning, and tables.
-Collapsed callouts display selected functions with `inspect.getsource`
-and explain them step by step.
+If you already fit pricing models, use the
+[conditional diagnostics](#sec-conditional-diagnostics) to review the
+distribution assumptions, then follow the [test audit](#sec-test-audit)
+through accuracy, calibration, and ranking to the
+[recorded findings](#sec-test-findings).
+
+Run the Python cells in order, whichever reading path you choose. The full
+freMTPL2 run can take a while; use a small sample to check that the notebook
+works, and the full data for actuarial conclusions.
 
 ```{python}
 from inspect import getsource
@@ -88,11 +97,9 @@ perceptually uniform, colourblind-safe cividis colormap. The library's
 
 ## Set a reproducible run
 
-Keep the production defaults below. Set `n_samples` only for
-a quick software smoke run.
-
-Fix the random seed, shared data splits, and tuning budgets before looking
-at results. Do not use a convenience sample to select a rate model.
+Keep the full-data defaults below when selecting a rate model; set `n_samples`
+only for a quick software check. Fix the random seed, shared data splits, and
+tuning budgets before looking at results.
 
 ```{python}
 n_samples = None  # e.g. 10_000 for a quick software smoke run
@@ -164,11 +171,17 @@ print_frame(
 ### Training portfolio averages by hand
 
 The structural audit above checks preparation across the source rows. Outcome
-summaries and exploration below use training policies only. The training
-portfolio averages are the exposure-weighted means of the rates. Because
-frequency, severity, and pure premium are each a risk-volume rate, the
-weighted mean of the rate equals the unweighted ratio of the underlying claim
-amounts:
+summaries and exploration below use training policies only. Each portfolio
+average divides a total by the volume over which it was observed:
+
+- Frequency is total claim count divided by total exposure, or the
+  exposure-weighted mean of policy frequencies.
+- Severity is total capped claim amount divided by total claim count, or the
+  claim-count-weighted mean of severity among claim-bearing policies.
+- Pure premium is total capped claim amount divided by total exposure, or the
+  exposure-weighted mean of policy pure premiums.
+
+The cell checks the frequency and pure-premium identities:
 
 ```{python}
 avg_frequency = splits.train["ClaimNb"].sum() / splits.train["Exposure"].sum()
@@ -183,37 +196,23 @@ print(f"Average pure premium: {avg_pure_premium:.2f} EUR / year")
 print(f"  check (weighted mean of rate): {avg_pure_premium_check:.2f}")
 ```
 
-The two ways of writing the average are identical because each rate is
-defined as `amount / volume`. The same identity is what makes the
-target × weight multiplication collapse to the underlying claim amounts in
-`portfolio_calibration_table` and `evaluate_predictions`.
+Multiplying a target by its weight recovers the policy's claim count for
+frequency, or its capped claim amount for severity and pure premium.
+`portfolio_calibration_table` and `evaluate_predictions` use this identity
+to compare observed and predicted totals.
 
 ::: {.callout-note collapse="true"}
 ## Look inside: `TARGET_SPECS` and `target_and_weight`
 
-`TARGET_SPECS` defines the targets and weights for frequency, severity, and
-pure premium. The `target_and_weight` helper returns the corresponding data.
-
-Step-by-step:
-
-1. **Look up** the `TargetSpec` for the requested component in the
-   `TARGET_SPECS` dict (frequency, severity, or pure_premium).
-2. **Slice the rows** if `claims_only` is `True` (used for severity), keeping
-   only policies with `ClaimNb > 0`.
-3. **Return** `(rows, target_array, weight_array)`, the target array is
-   the chosen column, the weight array is the row-appropriate exposure or
-   claim count.
+`TARGET_SPECS` defines each component's target, weight, and eligible rows.
+`target_and_weight` looks up that definition and returns
+`(rows, target_array, weight_array)`. For severity, `claims_only=True` keeps
+policies with `ClaimNb > 0`; frequency and pure premium use all policies.
 
 ```{python}
 show_source(target_and_weight)
 ```
 
-- `frequency` uses target `Frequency` with weight `Exposure` over all policies.
-- `severity` uses target `Severity` with weight `ClaimNb` over **claims only**, 
-  the `claims_only` flag filters rows to `ClaimNb > 0` so the average is
-  the claim-count-weighted mean of capped policy-average severity.
-- `pure_premium` uses target `PurePremium` with weight `Exposure` over all
-   policies. Multiplying by exposure recovers the total capped claim amount.
 :::
 
 ## Explore uncapped training outcomes before fitting
@@ -224,20 +223,23 @@ Use every training policy, accounting for unequal exposures and claim counts.
 Severity here is uncapped; the capped modelling targets remain unchanged.
 Tail disagreement can expose limitations of a reference. Pooled agreement
 cannot establish conditional model validity or select a model family.
-Nothing here fits a model or predicts a policy: each reference uses a single
-constant portfolio mean, whereas section 3.7 repeats the comparison against
-the fitted model's policy-specific predictions.
+Here we estimate a shared portfolio mean and, for severity, Gamma dispersion.
+The means do not vary with policy characteristics. The later
+[conditional diagnostics](#sec-conditional-diagnostics) repeat the comparison
+using means predicted from those characteristics by the fitted GLUM models.
 
 ### Frequency with unequal exposures
 
-The intercept-only annual rate is total claims divided by total exposure.
+The constant annual rate $\hat\lambda$ is total claims divided by total exposure.
 Compare exposure-weighted count proportions with the same weighted mixture
-of Poisson distributions, each with mean $e_i\hat\lambda$. A Poisson at the
+of Poisson distributions, each with mean $e_i\hat\lambda$, where $e_i$ is
+policy $i$'s exposure in years. A Poisson at the
 annual rate alone would treat every policy as a full year. Keep zero claims
 and a final overflow bin, so both probability distributions sum to one.
-Exposure and risk mixing can inflate marginal count variance even under a
-valid conditional Poisson model, so assess dispersion around fitted policy
-means in the later area residual-dispersion table.
+Pooling policies with different exposures or risks can make the count
+variance exceed the count mean, even if each policy follows a Poisson
+distribution at its own mean. The later area residual-dispersion table
+checks variation around fitted policy means.
 
 ```{python}
 #| label: exploratory-frequency
@@ -279,15 +281,32 @@ plt.tight_layout()
 plt.show()
 ```
 
+In this full-data run, the 542,410 training policies have an annual claim rate
+of 0.073705. The observed exposure-weighted zero-count proportion is 0.95194,
+versus 0.94435 for the Poisson mixture. One-claim policies have less weight
+than the reference predicts, while multiple claims have more. The linear
+panel is dominated by zeros; the log-y panel exposes the count-tail gaps.
+
 ### Uncapped policy-average severity
 
-For claim-bearing policies, let $y_i=\text{ClaimAmountOriginal}_i/n_i$.
-Estimate $\hat\mu=\sum_i n_i y_i/\sum_i n_i$ and fit base dispersion with
-`fit_gamma_dispersion` at that constant mean. Each policy contributes once
-to its likelihood. Under independent Gamma claims with a common mean,
-$y_i$ has shape $n_i/\phi$ and scale $\phi\mu/n_i$.
-Both the empirical distribution and the Gamma reference use claim-count
-weights.
+For claim-bearing policies, let $n_i$ be policy $i$'s claim count and
+$y_i=\text{ClaimAmountOriginal}_i/n_i$ its uncapped average claim amount.
+Estimate the mean $\hat\mu=\sum_i n_i y_i/\sum_i n_i$ and fit dispersion
+$\phi$ with `fit_gamma_dispersion`, keeping that mean fixed.
+
+The policy average becomes less variable as its claim count grows under
+the Gamma assumption below. Both plotted distributions use claim-count weights.
+
+::: {.callout-note collapse="true"}
+## Why claim count changes the Gamma reference
+
+Under independent Gamma claims with a common mean $\mu$ and dispersion
+$\phi$, the policy average $y_i$ has shape $n_i/\phi$, scale
+$\phi\mu/n_i$, and variance $\phi\mu^2/n_i$. We call $\phi$ the base
+dispersion because it describes variation before division by claim count.
+Each policy contributes once to the fitting likelihood; its claim count
+already enters through the shape and scale.
+:::
 
 ```{python}
 #| label: exploratory-severity-reference
@@ -321,8 +340,9 @@ print(
 ```
 
 The histogram uses logarithmic amount bins with density per euro.
-Survival is $P(Y>x)$ with the full claim-weight denominator, plotted to
-the observed maximum.
+The survival function (SF), $P(Y>x)$, gives the probability of exceeding
+amount $x$. Both curves keep the full claim-count denominator and extend
+to the observed maximum.
 
 ```{python}
 #| label: exploratory-severity-density
@@ -358,6 +378,25 @@ plt.tight_layout()
 plt.show()
 ```
 
+The 19,955 claim-bearing policies represent 21,146 claims. Their uncapped
+claim-weighted mean is EUR 2,346.72, with fitted base dispersion 1.54079.
+The density histogram has concentrations that the smooth Gamma mixture does
+not reproduce. At EUR 10,000 the reference survival is higher than observed;
+at EUR 100,000 and EUR 1,000,000 it is far lower, as the table below shows.
+The maximum policy average is EUR 4,075,400.56. Thus this constant-mean Gamma
+reference understates the far upper tail, but does not understate survival
+at every threshold. The next plot shows individual claims, with equal weight per claim.
+
+```{python}
+#| label: exploratory-tail-probabilities
+tail_thresholds = np.array([10_000, 100_000, 1_000_000])
+print_frame("Uncapped policy-average severity survival (full claim-weight denominator)", pd.DataFrame({
+    "threshold_EUR": tail_thresholds,
+    "observed_SF": [uncapped_n[uncapped_y > x].sum() / uncapped_n.sum() for x in tail_thresholds],
+    "Gamma_mixture_SF": gamma.sf(tail_thresholds[:, None], a=severity_shape, scale=severity_scale) @ mixture_weights,
+}))
+```
+
 ### Uncapped individual claims: a separate descriptive view
 
 Retain all positive claim records belonging to training policy IDs. Each claim
@@ -379,8 +418,13 @@ plt.show()
 
 ### Grouped severity mean and variance
 
+We next check how severity variation changes across vehicle-power and
+bonus-malus groups. The reference below uses the Gamma relationship between
+mean and variance; it does not estimate a new variance power from the groups.
+
 Within each `VehPower` or `BonusMalus` group, let $m_g$ be the number of
-claim-bearing policies and $n_i$ the policy claim count. Calculate
+claim-bearing policies and $n_i$ the policy claim count. The claim-weighted
+mean $\bar y_g$ and the measure of variation $V_g$ are
 
 $$
 \bar y_g=\frac{\sum_i n_i y_i}{\sum_i n_i},\qquad
@@ -388,7 +432,8 @@ V_g=\frac{\sum_i n_i(y_i-\bar y_g)^2}{m_g-1}.
 $$
 
 Under a common within-group Gamma mean, $V_g$ estimates $\phi\mu_g^2$.
-This is not the ordinary weighted variance of policy averages.
+Here $\mu_g$ is that group's common mean. The denominator counts policies
+minus one; the ordinary weighted variance would divide by total claim count.
 Retain groups with at least four claims and two claim-bearing policies.
 The table reports counts and exclusion reasons, including zero variance.
 
@@ -438,34 +483,6 @@ within-group risk differences affect their relation to the fixed Gamma
 $p=2$ reference. Later conditional diagnostics check residual dispersion
 around fitted risk-specific means on the capped modelling targets.
 
-### What the full training data show
-
-In this full-data run, the 542,410 training policies have an annual claim rate
-of 0.073705. The observed exposure-weighted zero-count proportion is 0.95194,
-versus 0.94435 for the Poisson mixture. One-claim policies have less weight
-than the reference predicts, while multiple claims have more. The linear
-panel is dominated by zeros; the log-y panel exposes the count-tail gaps.
-
-The 19,955 claim-bearing policies represent 21,146 claims. Their uncapped
-claim-weighted mean is EUR 2,346.72, with fitted base dispersion 1.54079.
-The density histogram has concentrations that the smooth Gamma mixture does
-not reproduce. At EUR 10,000 the reference survival is higher than observed;
-at EUR 100,000 and EUR 1,000,000 it is far lower, as the table below shows.
-The maximum policy average is EUR 4,075,400.56. Thus this constant-mean Gamma
-reference understates the far upper tail, but does not understate survival
-at every threshold. The separate individual-claim plot retains equal weight
-per claim and describes a different observable.
-
-```{python}
-#| label: exploratory-tail-probabilities
-tail_thresholds = np.array([10_000, 100_000, 1_000_000])
-print_frame("Uncapped policy-average severity survival (full claim-weight denominator)", pd.DataFrame({
-    "threshold_EUR": tail_thresholds,
-    "observed_SF": [uncapped_n[uncapped_y > x].sum() / uncapped_n.sum() for x in tail_thresholds],
-    "Gamma_mixture_SF": gamma.sf(tail_thresholds[:, None], a=severity_shape, scale=severity_scale) @ mixture_weights,
-}))
-```
-
 All 12 vehicle-power groups pass the count thresholds and have positive
 variance. For `BonusMalus`, 23 groups fail the count thresholds and one
 retained group has zero variance. The scatter is broad, with several
@@ -484,8 +501,7 @@ base dispersion $\phi$ on that training fit. Score development-validation
 rows with the same $\phi$, retain the power with the largest validation
 likelihood, and use that one power for every later deviance comparison.
 
-Select every hyperparameter, including distributional
-choices, without opening the test set; retain the profile for review.
+Retain the candidate-power profile for review.
 
 ```{python}
 selected_power, power_profile = select_tweedie_power(
@@ -499,7 +515,11 @@ print(f"Selected Tweedie power: {selected_power:.1f}")
 ::: {.callout-note collapse="true"}
 ## Look inside: Tweedie power selection
 
-The profile likelihood is
+We score how much probability each candidate assigns to the validation
+outcomes. Below, $f_p$ is the Tweedie density for positive rates and its
+probability mass for zero. The mean $\hat\mu_i$ comes from the fitted
+model; $e_i$ is exposure and $\phi$ is base dispersion.
+The validation log likelihood is
 
 $$
 L(p,\phi)=\sum_i \log f_p(y_i;\hat\mu_i,\phi/e_i),
@@ -522,20 +542,21 @@ show_source(select_tweedie_power)
 ```
 :::
 
-## Fit an interpretable GLUM benchmark
+## Fit an interpretable GLUM benchmark {#sec-glum-benchmark}
 
-An interpretable, stable benchmark tells us whether a flexible model
-earns its extra complexity.
+The GLUM benchmark lets us judge whether a flexible model earns its extra
+complexity. Fit a regularized model, which penalizes coefficient size, for
+prediction. Fit a separate unregularized model for coefficient relativities
+(the multiplicative effects on the predicted rate) and sandwich standard
+errors, which allow the variance to differ from the working distribution.
 
-Fit a regularized GLUM for prediction, then a separate
-unregularized GLUM for coefficient relativities with sandwich standard errors.
+The unregularized model's confidence intervals describe that fit. They do
+not apply to the penalized predictive fit. Review relativities for
+plausibility and choose predictions using out-of-sample evidence.
 
-Confidence intervals from the unregularized model are not
-inference for the penalized predictive fit. Review relativities for
-plausibility, but choose predictions with out-of-sample evidence.
-
-`fit_glum_predictive` profiles 3-fold cross-validation over
-$\alpha \times \mathrm{l1\_ratio}$. For severity, it appends zero-weight
+`fit_glum_predictive` uses 3-fold cross-validation to compare penalty
+strengths $\alpha$ and penalty mixtures $\mathrm{l1\_ratio}$ (0 for ridge,
+1 for lasso). For severity, it appends zero-weight
 anchor rows so categories absent in the training data still receive a
 defined prediction.
 
@@ -573,26 +594,28 @@ for component in TARGET_SPECS:
     )
 ```
 
-## Compare fitted conditional distributions on training policies
+## Compare fitted conditional distributions on training policies {#sec-conditional-diagnostics}
 
-Section 3.4 compared training outcomes with constant-mean portfolio
-references: one rate for the whole portfolio, no conditional expectation, and
-no per-policy prediction. This section compares observations with
-predictions. The GLUM benchmark of the previous section supplies a
-policy-specific mean to every eligible training row of each component, and
-each reference below is the conditional distribution that prediction implies:
-a Poisson or Negative Binomial count with mean $e_i\hat\lambda_i$, a Gamma
-policy-average severity with mean $\hat\mu_i$, and a Tweedie capped policy
-total with mean $e_i\hat\mu_i$. The panels therefore compare observations
-with the predictions of the model fitted in section 3.6; the only quantities
-fitted below are dispersion parameters.
+The uncapped exploration used shared portfolio means. Here the
+[GLUM models](#sec-glum-benchmark) supply means that vary with policy
+characteristics. A conditional
+distribution describes variation in outcomes at a given policy's predicted
+mean, exposure, and claim count where applicable. The table lists the working
+references for each component, using the capped modelling targets.
 
-These post-fit training diagnostics use capped targets and fitted policy means.
-The survival curves compare upper tails, the zero-mass table retains the two
-point masses, and the Pearson residual check compares conditional variation.
-All portfolio mixtures use the same risk-volume weights as their empirical
-counterparts; pooled agreement is not a formal assumption test or test-set
-performance evidence.
+The survival curves compare upper tails, the zero-mass table compares the
+probabilities of no claims and no loss, and the Pearson residual check
+compares squared errors scaled by the assumed variance. Empirical and
+reference curves use matching weights: exposure for counts and policy totals,
+claim count for severity. Their sum is called risk volume. Agreement in these
+pooled training views cannot establish correctness for each policy or
+performance on the test set.
+
+Here $e_i$ is policy exposure, $n_i$ is claim count, $\hat\lambda_i$ is
+predicted annual frequency, and $\hat\mu_i$ is predicted severity or pure
+premium, according to the row. Base dispersion $\phi$ controls variance
+before adjustment for claim count or exposure; $p$ is the selected Tweedie
+variance power.
 
 | Observable | Conditional reference | Curve weight |
 | --- | --- | --- |
@@ -602,15 +625,19 @@ performance evidence.
 
 ### Fit dispersion parameters; means stay fixed
 
-No mean is estimated here. Predicted rates stay fixed; the only fitted
-quantities are the Gamma base dispersion for severity, the Tweedie base
-dispersion for pure premium, and the Negative Binomial shape for frequency,
-each estimated on every eligible training row against the fixed predictions.
-The Gamma and Tweedie references thus share the model's policy means and
-working families with only a variance parameter estimated, and the Poisson
-count reference needs nothing fitted at all: its policy means come straight
-from the model.
-Only after those fits finish, sample up to 20,000 policies per component with
+Keep the GLUM predicted rates fixed. Estimate Gamma base dispersion for
+severity, Tweedie base dispersion for pure premium, and Negative Binomial
+shape for frequency on every eligible training row. The Poisson reference
+needs only the predicted policy count, so it has no additional parameter to fit.
+
+The Negative Binomial (NB2) form used here has variance $m_i+m_i^2/r$,
+where $m_i=e_i\hat\lambda_i$ is the predicted policy count and $r$ is
+the shape parameter. Smaller $r$ allows more variation; as $r$ grows, the
+reference approaches Poisson, whose variance is $m_i$.
+This NB overlay is a dispersion diagnostic; the fitted frequency pricing
+model remains Poisson.
+
+After those fits finish, sample up to 20,000 policies per component with
 seed 42 and reuse each component's rows, predictions, and weights throughout.
 
 ```{python}
@@ -664,10 +691,10 @@ print(f"NB shape: {nb_shape:.6g} (infinity denotes the Poisson limit)")
 
 ### Fitted zero mass
 
-Frequency and pure premium have point masses at zero. The table compares them
-without repeating the survival information in CDF panels. Because both rows
-use exposure weights, they describe a risk-volume-weighted portfolio view, not
-the ordinary distribution across policy records or a formal Poisson test.
+Frequency and pure premium can equal zero. The observed column gives the
+share of exposure on claim-free or zero-loss policies; the fitted column
+averages their predicted zero probabilities with the same exposure weights.
+These are exposure shares, rather than fractions of policy records.
 
 ```{python}
 #| label: diagnostic-zero-mass
@@ -710,50 +737,69 @@ print_frame(
 
 ### Policy claim-count tail
 
-The Poisson and Negative Binomial references keep the same fitted policy means.
-The fitted NB shape $r=1.17$ broadens the count tail, but it does not uniformly
-match the pooled empirical survival better: the observed two-or-more mass lies
-between the two references, while both references overstate the farther tail.
+At each count threshold, the curves show the probability of exceeding that
+count, averaged with exposure weights. The Poisson and Negative Binomial
+references keep the same fitted policy means.
 
 ```{python}
 #| label: frequency-sf
 poisson_ccdf_diagnostic(diagnostic_rows["frequency"], diagnostic_predictions["frequency"], nb_shape)
 ```
 
+The fitted NB shape $r=1.17$ broadens the count tail, but it does not uniformly
+match the pooled empirical survival better: the observed two-or-more mass lies
+between the two references, while both references overstate the farther tail.
+
 ### Positive capped policy-average severity tail
 
-The Gamma reference accounts for claim count through its policy-specific shape
-and scale. It misses the observed shoulder around EUR 1,000, overstates part of
-the middle tail, and then decays too quickly to reproduce the upper tail.
+The curves show the probability that capped policy-average severity exceeds
+each amount, using claim-count weights. The Gamma reference accounts for
+claim count through its policy-specific shape and scale.
 
 ```{python}
 #| label: severity-sf
 gamma_ccdf_diagnostic(diagnostic_rows["severity"], diagnostic_predictions["severity"], gamma_dispersion)
 ```
 
+The Gamma reference misses the observed shoulder around EUR 1,000, overstates
+part of the middle tail, and then decays too quickly to reproduce the upper tail.
+
 ### Capped policy-total tail
 
-The Tweedie reference converts fitted pure-premium rates to policy totals and
-uses exposure-adjusted dispersion. Its survival falls much faster than the
-empirical curve, materially understating the larger capped policy totals.
+The curves show the probability that a capped policy total exceeds each
+amount, using exposure weights. The Tweedie reference converts fitted
+pure-premium rates to policy totals and uses exposure-adjusted dispersion.
 
 ```{python}
 #| label: pure-premium-sf
 tweedie_ccdf_diagnostic(diagnostic_rows["pure_premium"], diagnostic_predictions["pure_premium"], selected_power, tweedie_dispersion)
 ```
 
+The Tweedie survival falls much faster than the empirical curve,
+understating the larger capped policy totals.
+
 ### Conditional residual dispersion by area
 
-Use all eligible training rows and fixed predicted means. For group $g$,
+To compare variation across areas, average squared residuals after scaling
+them for each policy's weight and predicted mean. Use all eligible training
+rows and keep the means fixed. For area $g$,
 
 $$
 D_g=\frac{1}{n_g}\sum_{i\in g}
 w_i\frac{(y_i-\hat\mu_i)^2}{\hat\mu_i^p}.
 $$
 
+Here $n_g$ counts eligible policies in area $g$, $y_i$ is the observed
+target, and $\hat\mu_i$ is its predicted mean. The weight $w_i$ is exposure
+for frequency and pure premium, or claim count for severity. The table's
+`risk_volume` is $\sum_{i\in g}w_i$; $D_g$ divides by policy count $n_g$.
+
 Fix $p=1$ for frequency, $p=2$ for severity, and the selected power for pure
-premium. Compare $D_g$ with 1 for Poisson or the fitted Gamma/Tweedie base
-dispersion, and read it alongside the weighted observed and predicted means.
+premium. Under the working variance assumption, variance is
+$\phi\hat\mu_i^p/w_i$. Compare $D_g$ with 1 for Poisson or the fitted
+base dispersion $\hat\phi$ for Gamma and Tweedie. Read it alongside the
+weighted observed and predicted means, since a mean error also increases
+squared residuals.
 
 ```{python}
 #| label: conditional-dispersion
@@ -769,8 +815,9 @@ Area frequency means are close to their fitted values, yet Pearson dispersion
 is 1.61–2.52 in every area against the Poisson reference of 1. That gap does
 not by itself identify a count family. A single claim on a short exposure
 inflates the squared Pearson residual, and an NB2 reference at the fitted
-shape $r=1.17$ would raise the expected dispersion only by $m/r$: a few
-percent at typical policy means, not 1.61–2.52. The count survival panel
+shape $r=1.17$ would raise each policy's expected scaled squared residual
+from 1 to $1+m_i/r$, an increase of only a few percent at typical policy
+means. This is much smaller than the area dispersions of 1.61–2.52. The count survival panel
 agrees that $r=1.17$ is a mild overlay, since the observed two-or-more mass
 lies between the Poisson and NB references and both overstate the farther
 tail. Poisson therefore remains a working mean and deviance model; these
@@ -780,8 +827,9 @@ specific alternative.
 Severity dispersion is 5.77–13.19 against the fitted Gamma reference of 1.17;
 pure-premium dispersion is 986–5,957 against the fitted Tweedie reference of
 314. Most area means remain close, although Area F has a visible mean gap.
-The tail and residual evidence therefore treat Gamma and Tweedie as working
-distributions too, not complete predictive descriptions.
+We therefore use Gamma and Tweedie as working
+distributions for mean fitting, without claiming they describe the full
+variation in outcomes.
 
 ::: {.callout-note collapse="true"}
 ## Look inside: conditional diagnostics
@@ -858,18 +906,15 @@ for component in TARGET_SPECS:
     print_frame(f"LightGBM {component} tuning", tuning)
 ```
 
-## Final locked test audit: produce four pure-premium estimates
+## Final locked test audit: produce four pure-premium estimates {#sec-test-audit}
 
-The comparison needs like-for-like predictions for the same policies.
-Frequency-severity and direct-Tweedie approaches answer the same pricing
-question through different modelling decompositions.
+Each approach estimates expected claim cost per unit exposure for the same
+test policies. GLUM and LightGBM each produce two estimates: predicted
+frequency multiplied by predicted severity, and a direct Tweedie prediction.
 
-Predict frequency and severity, multiply paired estimates,
-and predict pure premium directly with each model family.
-
-Multiply frequency and severity from the same model family
-unless a designed hybrid has been validated. Keep predictions positive and
-evaluate all four alternatives against the identical test set.
+Pair frequency and severity from the same model family; a hybrid pairing
+would need its own validation. Keep predictions positive and evaluate all
+four alternatives on the identical test set.
 
 ```{python}
 test_features = lightgbm_frame(splits.test)
@@ -918,15 +963,24 @@ evaluation cycle with data that did not inform that revision.
 
 ## Compare predictive accuracy with the proper score
 
-Prediction accuracy asks whether predicted rates are close to observed
-outcomes, with large risk volumes carrying appropriate influence.
+Weighted mean deviance measures prediction error using Poisson deviance for
+frequency, Gamma for severity, and Tweedie for pure premium. Exposure weights
+apply to frequency and pure premium; claim-count weights apply to severity.
+A proper score rewards the correct conditional mean in expectation, even
+when the working distribution does not describe the full outcome distribution.
 
-Report exposure- or claim-count-weighted deviance and D2 on
-the untouched test set, matching Poisson, Gamma, or Tweedie to the response.
+The output contains five measures. Read each within the same response and
+weighting convention; compare deviance and D2 at the same family and power.
 
-Compare deviance and D2 only between models of the same
-response and family; lower deviance and higher D2 are better. Never compare a
-frequency deviance directly with a severity or pure-premium deviance.
+| Column | What it measures | How to read it | Limit |
+| --- | --- | --- | --- |
+| `weighted_deviance` | Prediction error under the chosen deviance | Lower is better | A unit is not a euro; frequency and severity scores have different scales. |
+| `D2` | $1-\mathrm{deviance}/\mathrm{null\_deviance}$ | Higher is better; zero matches the constant-mean baseline | The baseline predicts the evaluation rows' weighted mean for every row. |
+| `actual_expected` (A/E) | Weighted observed total divided by predicted total | Near 1 means the totals agree; above 1 means the model predicts too little in total | Errors can cancel between segments. |
+| `raw_gini` | Ranking of observed losses by predicted rate | Higher positive values indicate better ranking | Rescaling predictions can change totals without changing ranks. |
+| `normalized_gini` | Raw Gini divided by Gini from ordering on observed outcomes | 1 matches that observed-outcome ordering | Uses the same outcomes and weights as its denominator; it does not measure calibration. |
+
+The following sections examine calibration and ranking in more detail.
 
 ```{python}
 for component, predictions in (
@@ -939,11 +993,6 @@ for component, predictions in (
         evaluate_predictions(splits.test, component, predictions, selected_power),
     )
 ```
-
-The proper score is the weighted mean deviance matched to the response
-distribution. `D2 = 1 - deviance / null_deviance` is the explained-deviance
-share against the weighted-mean null, so a higher D2 is better. The three
-branches of each deviance are visible in the source below.
 
 ::: {.callout-note collapse="true"}
 ## Look inside: `weighted_mean_deviance`
@@ -964,18 +1013,19 @@ show_source(weighted_mean_deviance)
 
 ## Check calibration in total and by segment
 
+A/E is $\sum_i w_i y_i / \sum_i w_i\hat\mu_i$, where $y_i$ and
+$\hat\mu_i$ are observed and predicted rates and $w_i$ is the component's
+weight. Multiplying by the weight recovers counts or claim amounts, as in
+the training portfolio averages.
+
 A useful ranking can still charge too much or too little in total.
-Portfolio calibration asks whether total expected claims match total observed
-claims; segment calibration asks whether the total is right *everywhere*, not
-just on average.
+Portfolio calibration compares predicted and observed totals; segment
+calibration checks whether agreement holds within customer groups.
 
-Calculate test actual/expected (A/E), observed total, and
-predicted total for frequency, severity, and pure premium, then compare
-observed and predicted rates by driver-age band.
-
-A/E near 1 is necessary but not sufficient. Quantify its
-uncertainty and repeat by meaningful segments and time periods; a perfect
-portfolio A/E can hide offsetting errors between customer groups.
+The tables report observed totals, predicted totals, and their ratio A/E
+(actual / expected) for all three components. An A/E of 1 means the totals
+match, but errors can cancel between groups. Allow for sampling uncertainty
+and compare rates by driver age and other meaningful segments or time periods.
 
 ```{python}
 for component, predictions in (
@@ -1028,20 +1078,15 @@ plt.show()
 
 ## Inspect single-model lift by predicted-risk decile
 
-Lift makes ranking concrete: it asks whether observed pure premium
-rises with the risk bands that a model predicts. It is also a calibration
-check by decile, observed should track predicted in absolute level, so it
-bridges the calibration evidence above and the ranking evidence below.
+Lift checks whether observed pure premium rises as predicted risk rises,
+and whether observed and predicted levels agree within each risk band.
+Sort test policies from lowest to highest predicted risk, then divide their
+exposure into ten equal bins (deciles). Equal exposure accounts for different
+policy durations.
 
-Divide test exposure, from safest to riskiest prediction, into
-ten equal-exposure bins and compare observed and predicted pure premium.
-
-Use equal exposure rather than equal policy counts when
-policies have different durations. Inspect credibility, uncertainty, and
-irregular deciles instead of choosing a model from one impressive endpoint.
-
-In the per-decile table, observed pure premium should rise with the decile
-and track the predicted level.
+The table shows the observed and predicted pure premium in each decile.
+Judge irregular patterns and gaps with the volume of data and sampling
+uncertainty in mind; one extreme decile is weak evidence for choosing a model.
 
 ```{python}
 lift_demo = exposure_balanced_lift_table(
@@ -1063,9 +1108,9 @@ show_source(exposure_balanced_lift_table)
 
 ### Per-model lift diagrams
 
-The same table as a chart for each of the four pure-premium models: the
-*gap* between observed and predicted per decile is the calibration part,
-the observed *range* across deciles is the ranking part.
+For each model, the gap between observed and predicted decile means shows
+calibration differences. The observed range across deciles shows how well
+the model separates lower and higher risks.
 
 ```{python}
 fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
@@ -1096,22 +1141,16 @@ plt.show()
 
 ## Test ranking ability with Lorenz curves and Gini
 
-Pricing also needs to order safer and riskier policies. A monotonic
-rescaling can preserve ranking while changing A/E.
+Sort test policies from low to high predicted pure premium. The ordered
+Lorenz curve plots cumulative exposure share against cumulative observed
+loss share in that order. Ties form a single block, so row order within a
+tie cannot change the curve. The diagonal represents no ranking information,
+including constant predictions.
 
-Order test policies from low to high predicted pure premium,
-then plot cumulative exposure against cumulative capped loss.
-
-Higher positive Gini is better, but inspect the full curve.
-A lower curve dominates only when it does not cross; crossing curves are not a
-ranking victory. Ranking evidence never replaces calibration evidence.
-
-### The ordered Lorenz curve
-
-The ordered Lorenz curve pairs cumulative exposure share with cumulative
-observed loss share after sorting policies low-to-high by predicted rate.
-Ties are averaged into a single block so the curve does not depend on row
-order.
+A curve below the diagonal means that policies ranked as lower risk account
+for a smaller share of losses than exposure. Higher positive Gini is better,
+but inspect the full curve: one model's curve dominates another only when
+it stays below it without crossing.
 
 ### Compute the Gini coefficient by hand
 
@@ -1124,6 +1163,9 @@ tie-aware Lorenz curve:
 $$
 G=2\int_0^1[u-L(u)]\,du.
 $$
+
+Here $u$ is cumulative exposure share and $L(u)$ is the corresponding
+cumulative observed loss share.
 
 For equal weights, outcomes `[0, 2]` and scores `[1, 2]` give signed area
 0.25, raw Gini 0.5, and normalized Gini 1. Constant scores give raw Gini 0.
@@ -1141,8 +1183,22 @@ np.testing.assert_allclose(
 )
 ```
 
-Good models bow the curve below the diagonal. A lower curve dominates only
-when it does not cross.
+### Ranking survives a change of scale
+
+A strictly increasing transformation preserves ranks and therefore Gini.
+Taking the log of positive predictions demonstrates this below. The
+transformed values are ranking scores; they are not pure-premium estimates
+to use in a tariff. Two models with the same Gini can predict different totals.
+
+```{python}
+raw = pure_premium_predictions["LightGBM Tweedie"]
+print(f"Gini on rates:        {gini(y_test, raw, exposure):.6f}")
+print(f"Gini on log(rates):   {gini(y_test, np.log(raw), exposure):.6f}")
+np.testing.assert_allclose(
+    gini(y_test, raw, exposure), gini(y_test, np.log(raw), exposure),
+    rtol=1e-12, atol=1e-12,
+)
+```
 
 ### Compare all four pure-premium predictions
 
@@ -1185,11 +1241,12 @@ plt.show()
 ::: {.callout-note collapse="true"}
 ## Look inside: `lorenz_curve` and `gini`
 
-The area formula equals $1-2\,\mathrm{AUC}$ of the same polygonal curve
-and the midrank form
+The area formula equals $1-2\,\mathrm{AUC}$, where AUC is the area under
+the same polygonal curve. It also equals the midrank form
 $G=2\sum_b T_b\bar F_b/\sum_b T_b-1$,
 where tied block $b$ has exposure $w_b$, weighted observed loss $T_b$,
-preceding exposure $W_{b-1}$, and $\bar F_b=(W_{b-1}+w_b/2)/W$.
+preceding exposure $W_{b-1}$, total exposure $W$, and exposure-share midpoint
+$\bar F_b=(W_{b-1}+w_b/2)/W$.
 Both aggregate identical scores first. Normalization divides by
 `gini(y_test, y_test, exposure)` and does not change the model ordering.
 
@@ -1215,12 +1272,11 @@ Order policies by each model-A/model-B pure-premium ratio and
 compare observed rates across equal-exposure ratio deciles.
 
 Low A/B ratios mean A predicts less relative to B; high ratios mean A
-predicts more relative to B. Compare observed levels with **both** model
+predicts more relative to B. Compare observed levels with both model
 curves in each bin. Rising observations alone do not favour A: with equal
 weights, observed `[1, 2, 4]`, A `[0.5, 2, 8]`, and B `[1, 2, 4]`, both
 the ratios and observations rise, yet B matches every observed level.
-Double lift is a diagnostic, not an automatic model selector; assess
-uncertainty and the proper score as well.
+Use the observed gaps alongside uncertainty and deviance when comparing models.
 
 ```{python}
 chosen_pairs = [
@@ -1244,34 +1300,16 @@ for model_a, model_b in chosen_pairs:
 ::: {.callout-note collapse="true"}
 ## Look inside: `exposure_balanced_double_lift_table`
 
-Step-by-step (the recipe is the single-model lift recipe with a different
-sort key and four cumulative weighted series instead of two):
-
-1. **Validate** that `n_bins` is positive and the exposure array has all
-   positive entries.
-2. **Sort** policies ascending by the A/B ratio and aggregate identical
-   ratios. The first decile has the lowest ratios; the last has the highest.
-3. **Cumulative sums** over tied blocks of exposure and exposure times each
-   observed rate, A prediction, B prediction, and individual A/B ratio;
-   prepend `0.0`.
-4. **Place the boundaries** at `np.linspace(0, cum_exposure[-1], n_bins + 1)`.
-5. **Interpolate** the cumulative weighted totals at each boundary with
-   `np.interp`, first aggregating identical A/B ratios and then distributing
-   each tied block proportionally across boundaries.
-6. **Per-decile rates** = diff of the cumulative series divided by the
-   per-decile exposure width. The final column averages individual A/B
-   ratios with exposure weights; it generally differs from the ratio of
-   the two bin means.
+The helper sorts by A/B ratio and combines equal ratios into tied blocks.
+It interpolates cumulative weighted totals at equal-exposure boundaries,
+spreading each tied block proportionally across bins. This makes the table
+independent of row order within ties. No bin, including either endpoint,
+is forced to match observations.
 
 ```{python}
 show_source(exposure_balanced_double_lift_table)
 ```
 
-The double-lift table is built the same way as the single-model lift table:
-policies are sorted by the model-A / model-B ratio, cumulative exposure and
-cumulative A-rate, B-rate, and observed rates are computed, and `np.interp`
-distributes tied ratio blocks proportionally so the deciles have equal
-exposure. No bin, including either endpoint, is forced to match observations.
 The `prediction_ratio` column averages individual ratios, not group means:
 in one equal-weight bin, A `[1, 4]` and B `[1, 2]` give a mean ratio of 1.5,
 while the ratio of group means is $5/3$.
@@ -1323,24 +1361,18 @@ plt.show()
 
 ## Inspect the full prediction distribution with hexbin plots
 
-Every score so far compresses each policy into one number.
-Hexagonally binned scatter plots of predicted against observed pure premium,
-and of the residuals, show the joint distribution the summaries hide: the
-mass of claim-free policies, the heavy observed tail, and where errors
-concentrate.
+The scores above summarize performance across policies. Hexbin plots group
+nearby points into hexagons to show where policies concentrate. Plotting
+predicted against observed pure premium, and residuals against predictions,
+reveals the claim-free mass and the spread of outcomes behind those scores.
 
 For each of the four pure-premium models, plot predicted vs
 observed hexbins on linear and log axes, and residuals on linear axes.
 Linear views show the bulk; the positive-loss log-log view describes the
 observed tail. Colour encodes the policy count per bin on a log scale,
-using the perceptually uniform, colourblind-safe cividis colormap; one
-shared colour scale per figure.
-
-Use perceptually-uniform, colourblind-safe colormaps
-(never jet/rainbow), keep the colour scale comparable
-within a figure, and remember the bins count policies, not exposure. Dense
-scatter views complement, never replace, the proper score and the lift
-tables.
+using the perceptually uniform, colourblind-safe cividis colormap and one
+shared colour scale per figure. These bins count policies, while the deviance
+and lift tables use exposure weights.
 
 ### Predicted vs observed, linear axes
 
@@ -1366,13 +1398,15 @@ hexbin_grid(
 
 ### Predicted vs observed, log axes
 
-Restricting to observed > 0 drops the claim-free mass (zeros cannot be
-logged) and describes positive outcomes. Conditioning on a positive loss
-changes the population: these remain pure-premium predictions, not severity
-predictions or predictions conditional on a claim. This is a descriptive
-view, not a mean-calibration check. Individual noisy losses need not lie
-near the identity line. Hexagon widths are equal in log space, so each
-decade of observed loss gets comparable resolution.
+The log-log panel shows the spread of positive observed pure premiums
+against predictions. Hexagon widths are equal in log space, so each decade
+of observed loss gets comparable resolution.
+
+Zeros cannot be logged, so this view excludes claim-free policies. The
+predictions still estimate pure premium across all outcomes; selecting
+positive losses does not turn them into severity predictions. This selected
+view cannot check mean calibration, and individual losses need not lie near
+the identity line.
 
 ```{python}
 positive_loss = y_test > 0
@@ -1424,7 +1458,7 @@ hexbin_grid(
 )
 ```
 
-## What this locked test showed
+## What this locked test showed {#sec-test-findings}
 
 On this full-data run, LightGBM frequency × severity had test deviance
 73.34 and A/E 1.020. Direct LightGBM Tweedie had deviance 73.61 and A/E
@@ -1433,95 +1467,22 @@ total. No recalibration was fitted to these results. They are a recorded
 audit, not a deployment choice. Relativities, fairness, and stability on
 later periods remain further work.
 
-## How to read and interpret
+### Before choosing a model
 
-Assess accuracy, calibration, ranking, lift, and the prediction distribution
-together. Record the locked test result before recalibrating or deploying.
+Use the test results to record which checks each candidate meets and which
+remain open:
 
-### What each score is telling you
+- Compare deviance at the same response and power, and judge whether the
+  improvement is large enough to matter.
+- Check total A/E and segment means with their uncertainty. In lift and
+  double-lift plots, compare observed levels with each model's predictions.
+- Read the full Lorenz curves alongside Gini; crossing curves leave the
+  ranking comparison unresolved.
+- Review the training tail and dispersion findings separately from mean
+  prediction. These checks do not establish a complete outcome distribution.
+- Review relativities, fairness, and stability on resamples or later periods.
+  Those checks remain further work in this tutorial.
 
-- **Gini**: measures ranking ability only, not accuracy. A monotonic
-  increasing transformation of the predictions leaves the Gini unchanged,
-  because the rank order is unchanged. Two models with the same Gini can
-  charge very different totals.
-
-  Strictly increasing log transformation of positive predictions, demonstrated:
-
-  ```{python}
-  raw = pure_premium_predictions["LightGBM Tweedie"]
-  print(f"Gini on rates:        {gini(y_test, raw, exposure):.6f}")
-  print(f"Gini on log(rates):   {gini(y_test, np.log(raw), exposure):.6f}")
-  np.testing.assert_allclose(
-      gini(y_test, raw, exposure), gini(y_test, np.log(raw), exposure),
-      rtol=1e-12, atol=1e-12,
-  )
-  ```
-
-- **Weighted deviance**: the proper score matched to the response
-  distribution (Poisson for frequency, Gamma for severity, Tweedie for pure
-  premium). Smaller is better; one unit does not translate directly to euros.
-  Its expected value targets the conditional mean even when the full
-  working distribution is misspecified; it does not verify that distribution.
-- **D2**: $1 - \mathrm{deviance} / \mathrm{null\_deviance}$, the
-  explained-deviance share against the weighted-mean null. Higher is better.
-  D2 is only comparable between models of the same response and same
-  family; a frequency D2 cannot be ranked against a severity D2.
-- **A/E (actual / expected)**: $\sum_i w_i y_i / \sum_i w_i \hat p_i$.
-  A/E near 1 is *necessary but not sufficient*: a portfolio can hit 1.0
-  with offsetting biases that cancel across segments. Always segment-check.
-
-### What each chart is telling you
-
-- **Training SF, zero mass, and dispersion**: compare fitted working
-  distributions with the same training observables and weights. Pooled
-  agreement does not establish conditional correctness or select a family.
-- **Calibration by driver age**: compare weighted observed and predicted
-  means in driver-age quantile bands, allowing for sampling uncertainty.
-- **Lift chart**: compare observed and predicted levels within equal-exposure
-  prediction bins. An increasing observed rate supports ranking; gaps
-  indicate calibration differences to investigate. Crossings can reflect
-  sampling noise and need not be a model defect.
-- **Lorenz curve**: raw Gini is twice the signed area between the diagonal
-  and the tie-aware curve. A lower curve dominates only if it never crosses
-  the other. The diagonal represents no ranking information, including
-  constant predictions.
-- **Double-lift chart**: low A/B ratios mean lower relative A predictions;
-  high ratios mean higher relative A predictions. Compare observations with
-  both model curves. Rising observations alone do not favour A, and endpoints
-  are not forced to match observed levels.
-- **Hexbin plots**: linear outcomes show the claim-free band at zero; the
-  positive-loss log-log view describes the tail in a selected population.
-  Neither requires individual losses to lie near the identity line.
-  Claim-free residuals necessarily form the $-\hat\mu$ stripe. Check the
-  mean with weighted calibration and lift, not symmetry of the visible
-  residual band. Multiplicative bias gives a sloped expected residual;
-  an additive bias gives a constant expected residual offset.
-
-### What a good model looks like for this problem
-
-Apply the checklist to the tables and charts you just printed:
-
-- *Accuracy*: lower deviance and higher D2 than the benchmark for the same
-  response and fixed power, with a gain large enough to matter.
-- *Portfolio calibration*: A/E near 1 and credible segment means close to
-  predictions, with uncertainty considered.
-- *Ranking*: positive prediction-ranked Gini and the full Lorenz comparison;
-  crossing curves do not establish dominance.
-- *Lift*: observed and predicted bin means agree within credible uncertainty;
-  observed risk separation supports ranking. Double lift compares both models.
-- *Distribution*: training conditional references and residual dispersion
-  receive separate scrutiny; test hexbins describe noisy individual outcomes.
-  Symmetric residuals and concentration on the identity line are not required.
-- *Business*: review relativities, fairness, and stability on resamples or
-  future periods. Those checks are further work, not established by this run.
-
-::: {.callout-note}
-## After the locked audit
-
-The fitted working families are Poisson, Gamma, and Tweedie. The training NB
-overlay is a dispersion diagnostic, not an additional trained pricing model.
-Neither pooled SF curves, zero masses, nor area averages justify a family
-switch. Any alternative family, recalibration, or feature change needs
-development-data fitting and validation followed by a new held-out audit.
-Record this run's results before starting that cycle.
-:::
+Record this audit before changing the model. Any alternative family,
+recalibration, or feature change needs development-data fitting and validation,
+followed by a new held-out audit using data that did not inform the change.

@@ -1,6 +1,6 @@
 # Remediation handoff
 
-Updated: 2026-09-07.
+Updated: 2026-09-11.
 
 The completed phase scope and acceptance checks are in [PLAN.md](PLAN.md). Read that file and
 [AGENTS.md](AGENTS.md) before continuing after a context reset.
@@ -12,12 +12,15 @@ The completed phase scope and acceptance checks are in [PLAN.md](PLAN.md). Read 
 | 1: Tweedie likelihood and probabilities | Implemented and verified; stopped for review | Preserve this work and its regression tests |
 | 2: Conditional distributions and plot repairs | Implemented and verified | Preserve this work and its regression tests |
 | 3: Interpretation and fresh book execution | Implemented and verified | Preserve this work |
-| Uncapped exploration before fitting | Implemented and verified | Stop for review |
+| Uncapped exploration before fitting | Implemented and verified | Preserve this work |
+| Editorial 1: Common-English wording and precision | Implemented and verified | Preserve this work |
+| Editorial 2: Learning path | Implemented and verified | Stop for review |
 
-The latest user request authorized one additional phase: uncapped training
-exploration before power selection or model fitting. Earlier phases are complete.
-The new phase is implemented and verified; stop here for review. Nothing
-has been committed or published by this agent.
+Both editorial phases are complete. The current session preserved the
+existing uncommitted Phase 1 edits and implemented Phase 2 in the chapter,
+refreshed its frozen outputs, and updated the handoff. No library, test,
+dependency, or book-configuration changes were needed. Nothing has been
+committed or published by this agent.
 
 **Backward compatibility is not required.** Remove obsolete interfaces and
 migrate repository callers directly. Do not retain aliases, wrappers,
@@ -671,3 +674,137 @@ Passed
 ~~~
 
 Stop here for review. Nothing committed or published.
+
+## Editorial Phase 1: Wording and precision (2026-09-11)
+
+Implemented the first phase of the user's editorial plan in
+book/pure_premium_tutorial.qmd using the no-ai-slop skill.
+
+- Corrected each portfolio average's numerator, denominator, and weights.
+  Frequency recovers claim counts; severity and pure premium recover capped
+  claim amounts. The cell still checks frequency and pure premium only.
+- Replaced the claim that exploration fits nothing with the actual
+  distinction: shared portfolio means and fitted Gamma dispersion before
+  fitting means that vary with policy characteristics. This supersedes the
+  wording described in the 2026-09-07 contrast handoff.
+- Explained base dispersion, survival, risk volume, NB2 mean/variance,
+  regularization, relativities, and the evaluation-row constant-mean D2
+  baseline. Defined the area formula's symbols and comparison values locally.
+- Shortened the target and double-lift walkthroughs, repeated instructions,
+  and decorative emphasis. Clarified what accuracy, calibration, lift, and
+  positive-loss plots measure. Retained the distinctions between individual
+  claims and policy averages, rates and totals, ranking and calibration,
+  and training diagnostics and test evaluation.
+
+Validation:
+
+~~~text
+uv sync --locked --all-groups
+Resolved 131 packages; audited 128 packages
+
+uv run python -m pytest tests/ -q
+44 passed, 132 subtests passed in 35.37s
+
+uv run ruff check .
+All checks passed!
+
+uv run ruff format --check .
+8 files already formatted
+
+git diff --check
+Passed (no PDF exclusion needed; the starting tree was clean)
+~~~
+
+A direct comparison with HEAD verifies that all 48 fenced blocks are
+byte-for-byte unchanged and in the same order, including all 47 Python
+cells, which parse successfully. Headings, link targets, displayed equations,
+and callout structure are preserved; math delimiters balance. The two-policy
+Gini example, both double-lift counterexamples, claim-free residual explanation,
+and recorded locked-test findings are preserved verbatim. The edited prose
+was reviewed against the no-ai-slop evaluation checklist, with the user's
+Phase 2 structural work explicitly deferred.
+
+No library code, test code, figures, configuration, or frozen outputs changed.
+The book was not re-rendered and model computations were not rerun; this
+phase makes no new claim about the freshness of existing frozen artifacts.
+The next phase covers the opening and reading guide, complete metric guide,
+placement of interpretations, rendered reading order, and ending consolidation.
+PLAN.md records that scope. Stop here for review before starting Phase 2.
+
+## Editorial Phase 2: Learning path (2026-09-11)
+
+Completed Phase 2 on top of the existing Phase 1 edits. The no-ai-slop
+review guided the opening, placement of explanations, and consolidation
+of the ending.
+
+- Added the pricing task, four estimates, guidance for junior and experienced
+  readers, and links to the existing targets table, diagnostics, test audit,
+  and findings. Replaced hard-coded section numbers with links.
+- Introduced all five evaluation columns before the first results table,
+  with direction, baseline, and limits. Defined A/E beside calibration.
+- Put exploration findings beside their plots and moved the tail-probability
+  table beside severity survival. Each conditional tail panel explains its
+  quantity and weights before the plot, then interprets the recorded result.
+- Explained grouped severity variation and the likelihood/Gini symbols.
+  Kept Gamma shape and scale details in a collapsed note.
+- Moved the Gini transformation demonstration into the ranking section.
+  Consolidated the ending into the findings, one decision checklist, and
+  the next evaluation cycle.
+
+### Validation
+
+All 47 Python cells preserve their pre-session ASTs. Only the tail table and
+Gini demonstration moved; other cells retain their content and order.
+Dependency checks and fresh execution confirm the moved cells have their
+inputs. Source links, equations, math delimiters, and callouts pass inspection.
+The two-policy Gini and both double-lift counterexamples, claim-free
+residual explanation, and recorded findings are preserved. The edited prose
+was checked against the no-ai-slop evaluation checklist.
+
+~~~text
+uv run python -m pytest tests/ -q
+44 passed, 132 subtests passed in 34.51s
+
+uv run ruff check .
+All checks passed!
+
+uv run ruff format --check .
+8 files already formatted
+
+git diff --check
+Passed
+~~~
+
+Quarto 1.9.38 executed all 47 cells on the full dataset with unchanged model
+settings and a restarted kernel, then assembled all five book pages:
+
+~~~sh
+QUARTO_PYTHON=/home/bsatom/Documents/nonlife-pureprem/.venv/bin/python quarto render book/pure_premium_tutorial.qmd --no-cache --execute-daemon-restart --log /tmp/pureprem-editorial.KHC5tu/tutorial-render.log
+QUARTO_PYTHON=/home/bsatom/Documents/nonlife-pureprem/.venv/bin/python quarto render book --metadata-file /tmp/pureprem-editorial.KHC5tu/freeze.yml --log /tmp/pureprem-editorial.KHC5tu/book-render.log
+~~~
+
+Context7 and the [Quarto Python documentation](https://quarto.org/docs/computations/python.html)
+confirmed that single-document renders execute code despite project freeze.
+Temporary metadata sets only execute.freeze to true for book assembly.
+Repository configuration is unchanged.
+
+HTML inspection verified tutorial navigation links, local images, the metric
+guide before the first accuracy table, the Gini demonstration before model
+comparison, and the new opening and ending. All 16 referenced figures have
+identical content hashes to the prior run, allowing for renumbering.
+Frozen image references match the files. This was an HTML structure and
+reading-order check, not a browser screenshot review.
+
+Fresh results still give LightGBM frequency x severity deviance 73.3357 and
+A/E 1.02016; direct LightGBM Tweedie gives 73.6108 and 1.11671. Raw and
+log-transformed prediction Gini both give 0.327742. These confirm the
+existing rounded prose; no model choice or recalibration was added.
+
+Two obsolete numbered figures, cell-39-output-1.png and cell-44-output-1.png,
+and the patch utility's chapter backup were moved to
+/tmp/pureprem-editorial.KHC5tu and remain recoverable there. This directory
+also contains pre-session copies of the chapter, handoff, and frozen outputs.
+The apply_patch helper failed with the known bwrap startup error; the system
+patch utility was used after escalation. No library or test code changed.
+
+Both editorial phases are implemented and verified. Stop for review.
