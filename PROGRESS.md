@@ -1,6 +1,6 @@
 # Remediation handoff
 
-Updated: 2026-09-11.
+Updated: 2026-09-18.
 
 The completed phase scope and acceptance checks are in [PLAN.md](PLAN.md). Read that file and
 [AGENTS.md](AGENTS.md) before continuing after a context reset.
@@ -14,7 +14,8 @@ The completed phase scope and acceptance checks are in [PLAN.md](PLAN.md). Read 
 | 3: Interpretation and fresh book execution | Implemented and verified | Preserve this work |
 | Uncapped exploration before fitting | Implemented and verified | Preserve this work |
 | Editorial 1: Common-English wording and precision | Implemented and verified | Preserve this work |
-| Editorial 2: Learning path | Implemented and verified | Stop for review |
+| Editorial 2: Learning path | Implemented and verified | Preserve this work |
+| Tutorial review fixes (2026-09-18) | Implemented and verified | Stop for review |
 
 Both editorial phases are complete. The current session preserved the
 existing uncommitted Phase 1 edits and implemented Phase 2 in the chapter,
@@ -808,3 +809,37 @@ The apply_patch helper failed with the known bwrap startup error; the system
 patch utility was used after escalation. No library or test code changed.
 
 Both editorial phases are implemented and verified. Stop for review.
+
+## Tutorial review fixes (2026-09-18)
+
+Four findings from a fresh read of `book/pure_premium_tutorial.qmd` were fixed:
+
+- The chapter now prints the `lift_diagnostics` summary table it references
+  (the cell had lost the call while the sentence and import remained).
+- `prepare_mtpl_data` reports `source_claims` and `claim_records` instead of
+  `positive_claims`; the structural audit prints both totals, and the
+  preparation prose documents the one-year exposure cap and states that
+  claim counts come from the positive claim records, not the source
+  `ClaimNb`. Full data: 36,102 source claims, 26,444 records, 9,117
+  disagreeing policies.
+- A sentence after the accuracy tables records that the severity models have
+  essentially zero D2 and near-zero Gini against a constant, so the
+  decomposed estimates are nearly frequency times a constant mean severity.
+
+Validation:
+
+~~~text
+.venv/bin/python -m pytest tests/ -q
+44 passed, 132 subtests passed in 94.05s
+
+.venv/bin/ruff check . && .venv/bin/ruff format --check .
+All checks passed! 8 files already formatted
+
+QUARTO_PYTHON=.venv/bin/python quarto render book --log /tmp/opencode/render-fixes.log
+Output created: _book/index.html
+~~~
+
+The render refreshed the tutorial's frozen outputs; no execution errors and no
+stderr cell outputs. The numeric results are unchanged (deviance 73.3357 and
+A/E 1.02016 for LightGBM frequency x severity; 73.6108 and 1.11671 for direct
+LightGBM Tweedie). Stop for review.

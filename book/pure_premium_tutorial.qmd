@@ -113,12 +113,15 @@ early_stopping_rounds = 50
 Frequency and pure premium are rates per unit exposure; severity is an
 average amount per claim.
 
-Load policy and claim tables, remove non-positive claims, cap
-each claim, aggregate claims to policy level, and construct the three targets.
+Load policy and claim tables, remove non-positive claims, cap each claim at
+EUR 100,000, cap exposure at one year, aggregate claims to policy level, and
+construct the three targets. Claim counts come from the positive claim
+records, not the source `ClaimNb`, so frequency and pure premium share one
+claim set; the structural audit reports both totals and the disagreeing rows.
 
-Reconcile source claim counts with claim records, choose
-and document the cap before fitting, and use exposure for frequency and pure
-premium but claim count for claim-weighted severity.
+Reconcile source claim counts with claim records, document the caps before
+fitting, and use exposure for frequency and pure premium but claim count for
+claim-weighted severity.
 
 ```{python}
 #| label: prepare-and-split
@@ -127,7 +130,14 @@ splits = make_splits(data)
 print_frame("Target and weight definitions", target_weight_table())
 structural_audit = {
     key: audit[key]
-    for key in ("policies", "claim_cap", "exposure_capped_rows", "claim_count_mismatch_rows")
+    for key in (
+        "policies",
+        "claim_cap",
+        "source_claims",
+        "claim_records",
+        "exposure_capped_rows",
+        "claim_count_mismatch_rows",
+    )
 }
 print_frame("Structural preparation audit (all source rows)", pd.DataFrame([structural_audit]))
 ```
@@ -994,6 +1004,11 @@ for component, predictions in (
     )
 ```
 
+The severity table is the exception: both models sit at essentially zero D2
+and near-zero Gini against the constant-mean baseline, so the decomposed
+pure-premium estimates are close to predicted frequency times a near-constant
+average claim amount.
+
 ::: {.callout-note collapse="true"}
 ## Look inside: `weighted_mean_deviance`
 
@@ -1093,10 +1108,15 @@ lift_demo = exposure_balanced_lift_table(
     y_test, pure_premium_predictions["LightGBM Tweedie"], exposure
 )
 print_frame("LightGBM Tweedie: per-decile lift", lift_demo)
+print_frame(
+    "Pure-premium lift ranges",
+    lift_diagnostics(y_test, pure_premium_predictions, exposure),
+)
 ```
 
-The summary `lift_diagnostics` table only lists the first and last decile
-plus the range; the full table above is what those come from.
+The summary `lift_diagnostics` table below only lists the first and last
+decile plus the range; the full per-decile table above is what those come
+from.
 
 ::: {.callout-note collapse="true"}
 ## Look inside: `exposure_balanced_lift_table`

@@ -216,7 +216,8 @@ def prepare_mtpl_data(
     report: dict[str, int | float] = {
         "policies": len(policies),
         "claim_cap": claim_cap,
-        "positive_claims": int(policies["ClaimNb"].sum()),
+        "source_claims": int(policies["SourceClaimNb"].sum()),
+        "claim_records": int(policies["ClaimNb"].sum()),
         "exposure_capped_rows": exposure_capped_rows,
         "claim_count_mismatch_rows": int(
             (policies["SourceClaimNb"] != policies["ClaimNb"]).sum()
