@@ -1292,7 +1292,7 @@ $$
 
 This agrees exactly with the compound Poisson calculation.
 
-## Why the pure-premium Tweedie uses exposure as its weight
+## Why the pure-premium Tweedie uses exposure as its weight {#sec-tweedie-exposure-weight}
 
 The pure-premium response satisfies
 
@@ -1498,7 +1498,7 @@ $$
 $$
 
 
-## Why this is not the same as forcing common dispersion on aggregate loss
+## Why this is not the same as forcing common dispersion on aggregate loss {#sec-common-dispersion}
 
 A common conceptual mistake is to write
 
@@ -1725,7 +1725,7 @@ follows from a stochastic exposure model. The basic assumptions include:
 
 These assumptions can be questionable when there is strong seasonality, endogenous cancellation, catastrophe dependence, within-policy changes in coverage, or other forms of non-homogeneous exposure.
 
-## Poisson counts with exposure offset versus claim-frequency rates with exposure weight
+## Poisson counts with exposure offset versus claim-frequency rates with exposure weight {#sec-poisson-offset-weight}
 
 This appendix proves the exact analogue for claim frequency. The result is simpler than for Tweedie because Poisson corresponds to the boundary power $p=1$.
 

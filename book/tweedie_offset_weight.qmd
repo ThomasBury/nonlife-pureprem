@@ -3,27 +3,41 @@ title: "Tweedie Offset–Weight Equivalence"
 ---
 
 This chapter compares Tweedie totals with an exposure offset against rates
-with exposure weights. It includes:
+with exposure weights $e_i^{2-p}$, under a **common** aggregate dispersion.
 
-- A data generator for Tweedie totals with exposure
-- scikit-learn TweedieRegressor: rates + correct `sample_weight = exposure**(2 - p)`
+::: {.callout-warning}
+## This is not the ratemaking weight
+
+The fits below assume
+
+$$
+S_i\sim\operatorname{Tw}_p(e_i\mu_i,\phi)
+$$
+
+with the same $\phi$ for every exposure. Then
+$\operatorname{Var}(S_i)=\phi(e_i\mu_i)^p$, and the equivalent rate weight is
+$e_i^{2-p}$.
+
+That is not the compound Poisson process used for pricing. There
+$\operatorname{Var}(S_i)=e_i\phi\mu_i^p$, the aggregate dispersion is
+$\phi_{S,i}=\phi e_i^{1-p}$, and the pure-premium weight is $e_i$ for every
+$p$ (@sec-tweedie-exposure-weight, @sec-common-dispersion). The two weights
+coincide only at $p=1$.
+:::
+
+The implementations are:
+
+- scikit-learn `TweedieRegressor`: rates + `sample_weight = exposure**(2-p)`
 - LightGBM Tweedie: (A) totals + offset via `init_score=log(exposure)`,
-  (B) rates + `sample_weight = exposure**(2 - p)`
-- Numeric checks: deviance equivalence across implementations
-- Special cases: Poisson (p=1), Gamma (p=2)
-
-These examples use a common dispersion for Tweedie totals. The compound
-Poisson–Gamma process in the theory chapter uses a dispersion that varies with
-exposure. See that chapter and the pure-premium tutorial for the corresponding
-exposure weights.
+  (B) rates + `sample_weight = exposure**(2-p)`
 
 ```{python}
 from __future__ import annotations
 
 import math
 import typing
-import warnings
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from numpy.random import default_rng
@@ -41,11 +55,6 @@ console = Console()
 np.set_printoptions(suppress=True, linewidth=120)
 EXPOSURE_FLOOR = 1e-9
 LGB_DISABLE_BOOST_FROM_AVERAGE = True
-
-
-def emit(message: str) -> None:
-    """Print a message with Rich when available."""
-    console.print(message)
 
 
 def _format_value(value: object) -> str:
@@ -184,16 +193,13 @@ def fit_lgbm_tweedie_totals_offset(
 ) -> tuple[lgb.Booster, tuple[np.ndarray, np.ndarray]]:
     """LightGBM Tweedie on totals with init_score = log(exposure)."""
     ytr = df_train["Total"].to_numpy(dtype=float)
-    yte = df_test["Total"].to_numpy(dtype=float)
     Xtr = df_train[feature_cols].to_numpy()
     Xte = df_test[feature_cols].to_numpy()
     exposure_tr = df_train["Exposure"].to_numpy(dtype=float)
     exposure_te = df_test["Exposure"].to_numpy(dtype=float)
     init_tr = np.log(np.fmax(exposure_tr, EXPOSURE_FLOOR))
-    init_te = np.log(np.fmax(exposure_te, EXPOSURE_FLOOR))
 
     dtrain = lgb.Dataset(Xtr, label=ytr, init_score=init_tr)
-    dvalid = lgb.Dataset(Xte, label=yte, init_score=init_te, reference=dtrain)
 
     params = {
         "objective": "tweedie",
@@ -202,9 +208,7 @@ def fit_lgbm_tweedie_totals_offset(
         "verbose": -1,
         "seed": seed,
     }
-    gbm = lgb.train(
-        params, dtrain, valid_sets=[dvalid], num_boost_round=num_boost_round,
-    )
+    gbm = lgb.train(params, dtrain, num_boost_round=num_boost_round)
 
     rhat_tr = np.asarray(gbm.predict(Xtr))
     rhat_te = np.asarray(gbm.predict(Xte))
@@ -223,14 +227,11 @@ def fit_lgbm_tweedie_rates_weights(
 ) -> tuple[lgb.Booster, tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:
     """LightGBM Tweedie on rates with weight = exposure^(2-p)."""
     rtr = df_train["Rate"].to_numpy(dtype=float)
-    rte = df_test["Rate"].to_numpy(dtype=float)
     Xtr = df_train[feature_cols].to_numpy()
     Xte = df_test[feature_cols].to_numpy()
     wtr = (df_train["Exposure"].to_numpy()) ** (2.0 - p)
-    wte = (df_test["Exposure"].to_numpy()) ** (2.0 - p)
 
     dtrain = lgb.Dataset(Xtr, label=rtr, weight=wtr)
-    dvalid = lgb.Dataset(Xte, label=rte, weight=wte, reference=dtrain)
 
     params = {
         "objective": "tweedie",
@@ -239,9 +240,7 @@ def fit_lgbm_tweedie_rates_weights(
         "verbose": -1,
         "seed": seed,
     }
-    gbm = lgb.train(
-        params, dtrain, valid_sets=[dvalid], num_boost_round=num_boost_round,
-    )
+    gbm = lgb.train(params, dtrain, num_boost_round=num_boost_round)
 
     rhat_tr = np.asarray(gbm.predict(Xtr))
     rhat_te = np.asarray(gbm.predict(Xte))
@@ -370,16 +369,21 @@ def rel_rmse(a: np.ndarray, b: np.ndarray) -> float:
     return math.sqrt(np.mean(((a - b) / denom) ** 2))
 
 print_table(
-    "Equivalence Checks (test set)",
+    "Formulation: LGB offset vs LGB weighted (test set)",
     (
         (
-            "RMSE: LGB offset vs LGB exact weighted rate",
+            "RMSE",
             root_mean_squared_error(lgb_off_yhat_te, lgb_wt_yhat_te),
         ),
         (
-            "Relative RMSE: LGB offset vs LGB exact weighted rate",
+            "Relative RMSE",
             rel_rmse(lgb_off_yhat_te, lgb_wt_yhat_te),
         ),
+    ),
+)
+print_table(
+    "Learner comparison: GLM vs trees (test set)",
+    (
         (
             "RMSE: sklearn vs LGB offset",
             root_mean_squared_error(sk_yhat_te, lgb_off_yhat_te),
@@ -389,40 +393,63 @@ print_table(
             rel_rmse(sk_yhat_te, lgb_off_yhat_te),
         ),
         (
-            "RMSE: sklearn vs LGB exact weighted rate",
+            "RMSE: sklearn vs LGB weighted",
             root_mean_squared_error(sk_yhat_te, lgb_wt_yhat_te),
         ),
         (
-            "Relative RMSE: sklearn vs LGB exact weighted rate",
+            "Relative RMSE: sklearn vs LGB weighted",
             rel_rmse(sk_yhat_te, lgb_wt_yhat_te),
         ),
     ),
 )
 ```
 
-## Special cases: p=1 (Poisson) and p=2 (Gamma)
+The left panel aggregates the test set into exposure deciles. Observed and
+predicted totals track each other across the exposure range, so $e_i$ enters
+on the scale implied by $S_i\sim\operatorname{Tw}_p(e_i\mu_i,\phi)$. Nested
+markers keep all three series visible. The two LightGBM fits draw as one line:
+that is the formulation table above (offset versus $e_i^{2-p}$ weights). The
+scikit-learn GLM follows the same shape a few percent off; that is the learner
+table, a regularised linear fit against boosted trees, not a difference
+between offset and weights. The right panel is predicted / observed by
+decile.
 
 ```{python}
-for p_special in (1.0, 2.0):
-    df_sp = make_insurance_data(
-        n=40_000, p_index=p_special, phi=phi, n_features=6, seed=123
-    )
-    df_tr, df_te = train_test_split(df_sp, test_size=0.25, random_state=0)
-    glm_sp, (yhat_tr_sp, yhat_te_sp), _, _ = fit_sklearn_tweedie_rates(
-        df_tr,
-        df_te,
-        [c for c in df_sp.columns if c.startswith("x")],
-        p_special,
-        alpha=alpha,
-    )
-    dev_sp = evaluate_deviance(df_te["Total"].to_numpy(), yhat_te_sp, p_special)
-    print_table(
-        f"Special Case p = {p_special:.1f}",
-        (
-            ("test deviance (sklearn)", dev_sp),
-            ("expected rate weight", "exposure" if p_special == 1.0 else "1"),
-        ),
-    )
+exposure_deciles = pd.qcut(df_test["Exposure"], 10, duplicates="drop")
+bin_exposure = df_test.groupby(exposure_deciles, observed=True)["Exposure"].mean()
+observed_mean = df_test.groupby(exposure_deciles, observed=True)["Total"].mean()
+fitted_totals = (
+    ("scikit-learn rates + weights", sk_yhat_te, "--", "s", 6, "#0072B2"),
+    ("LightGBM totals + offset", lgb_off_yhat_te, "--", "^", 9, "#D55E00"),
+    ("LightGBM rates + weights", lgb_wt_yhat_te, ":", "o", 3, "#009E73"),
+)
 
-emit("\nAll done.")
+fig, (axis, ratio_axis) = plt.subplots(1, 2, figsize=(11, 4.5))
+axis.plot(bin_exposure, observed_mean, "o-", color="black", label="Observed")
+for label, yhat, style, marker, size, color in fitted_totals:
+    means = (
+        pd.Series(yhat, index=df_test.index)
+        .groupby(exposure_deciles, observed=True)
+        .mean()
+    )
+    axis.plot(
+        bin_exposure, means, style, marker=marker, markersize=size, color=color,
+        label=label,
+    )
+    ratio_axis.plot(
+        bin_exposure, means / observed_mean, style, marker=marker, markersize=size,
+        color=color, label=label,
+    )
+ratio_axis.axhline(1.0, color="black", linewidth=1)
+axis.set(
+    xscale="log", xlabel="Exposure", ylabel="Mean total per policy",
+    title="Observed vs predicted by exposure decile",
+)
+ratio_axis.set(
+    xscale="log", xlabel="Exposure", ylabel="Predicted / observed",
+    title="Calibration ratio",
+)
+ratio_axis.legend(fontsize="small")
+plt.tight_layout()
+plt.show()
 ```

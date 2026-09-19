@@ -2,17 +2,31 @@
 title: "Poisson Offset–Weight Equivalence"
 ---
 
-This chapter compares three equivalent Poisson formulations with exposure:
+This chapter checks the Poisson identity proved in
+@sec-poisson-offset-weight: for a log-link frequency model,
+
+$$
+\log\Lambda_i=\log e_i+X_i^\top\beta
+\quad\Longleftrightarrow\quad
+F_i=N_i/e_i
+\text{ with weight }e_i,
+$$
+
+where $\Lambda_i=e_i\nu_i$ is the expected count and $F_i$ is the observed
+rate. The three LightGBM implementations are:
 
 1. counts + offset via `init_score = log(exposure)`
 2. rates + weights via `weight = exposure`
-3. a custom objective that injects the offset directly in the gradients
+3. a custom objective that injects the offset in the gradients
 
-Two categorical features and simulated claim counts let you compare the
-predictions directly in the output tables.
+`predict()` returns a rate for (1) and (2). The custom objective returns a
+raw log-rate, so (3) needs `exp`. Set `boost_from_average=False` on the
+offset model: the offset already sets the level, and the default would add
+$\log\bar N$ on top of $\log e_i$.
 
 ```{python}
 import lightgbm as lgb
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import poisson
@@ -23,11 +37,6 @@ from rich.table import Table
 
 console = Console()
 np.random.seed(100)
-
-
-def emit(message: str) -> None:
-    """Print a message with Rich when available."""
-    console.print(message)
 
 
 def _format_value(value: object) -> str:
@@ -56,14 +65,6 @@ def print_table(title: str, df: pd.DataFrame) -> None:
 ## Data generation
 
 ```{python}
-data_basic = pd.DataFrame(
-    {
-        "var1": ["A"] * 5000 + ["B"] * 5000,
-        "var2": ["C"] * 2500 + ["D"] * 2500 + ["C"] * 2500 + ["D"] * 2500,
-        "expos": 1,
-    }
-)
-
 data_easy = pd.DataFrame(
     {
         "var1": ["A"] * 5000 + ["B"] * 5000,
@@ -99,26 +100,8 @@ def generate_claim_counts(dt: pd.DataFrame, var_impact: pd.DataFrame) -> pd.Data
     return dt
 
 
-data_basic = generate_claim_counts(data_basic, var_impact)
 data_easy = generate_claim_counts(data_easy, var_impact)
 data_mod = generate_claim_counts(data_mod, var_impact)
-```
-
-## Checks
-
-```{python}
-print_table(
-    "Data Basic Counts",
-    pd.DataFrame(
-        data_basic.groupby(["var1", "var2", "expos"]).size(), columns=["N"]
-    ).reset_index(),
-)
-print_table(
-    "Data Easy Poisson Check",
-    data_easy.groupby(["var1", "var2", "expos", "lambda"])["claim_count"]
-    .mean()
-    .reset_index(),
-)
 ```
 
 ## Solution 1: init_score (counts + offset)
@@ -155,41 +138,6 @@ data_easy["sol_1_predict_raw"] = predicted_counts_easy
 predicted_counts_mod = solution_1_predict(data_mod)
 data_mod["sol_1_predict"] = predicted_counts_mod * np.fmax(data_mod["expos"], 1e-9)
 data_mod["sol_1_predict_raw"] = predicted_counts_mod
-```
-
-## Solution 1B: Tweedie(p=1) + offset
-
-```{python}
-def solution_1b_predict(data_curr: pd.DataFrame) -> np.ndarray:
-    """Tweedie(p=1) LightGBM with log(exposure) offset (equivalent to Poisson)."""
-    data_curr_recoded = data_curr[["var1", "var2"]].copy()
-    for col in ["var1", "var2"]:
-        data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
-
-    dtrain = lgb.Dataset(
-        data_curr_recoded.values,
-        label=data_curr["claim_count"].values,
-        init_score=np.log(np.fmax(data_curr["expos"].values, 1e-9)),
-        categorical_feature=[0, 1],
-    )
-
-    param = {
-        "objective": "tweedie",
-        "tweedie_variance_power": 1,
-        "num_iterations": 100,
-        "learning_rate": 0.5,
-        "verbose": -1,
-        "boost_from_average": False,
-    }
-
-    lgb_model = lgb.train(param, dtrain)
-    return np.asarray(lgb_model.predict(data_curr_recoded.values))
-
-
-data_easy["sol_1b_predict_raw"] = solution_1b_predict(data_easy)
-data_easy["sol_1b_predict"] = data_easy["sol_1b_predict_raw"] * data_easy["expos"]
-data_mod["sol_1b_predict_raw"] = solution_1b_predict(data_mod)
-data_mod["sol_1b_predict"] = data_mod["sol_1b_predict_raw"] * data_mod["expos"]
 ```
 
 ## Solution 2: Rates with exposure weights
@@ -273,16 +221,6 @@ data_mod["sol_3_predict"] = np.exp(data_mod["sol_3_predict_raw"]) * data_mod["ex
 ## Analysis: equivalence checks
 
 ```{python}
-emit("\n[bold]Analysis of Predicted Counts (should match lambda)[/bold]")
-for i in [1, 2, 3]:
-    solution_check = (
-        data_easy.groupby("lambda")[f"sol_{i}_predict"]
-        .mean()
-        .reset_index(name="mean_predicted_count")
-    )
-    print_table(f"Solution {i} (Easy Data)", solution_check)
-
-
 agg_rows = [
     ("Observed counts", data_mod["claim_count"].sum()),
     ("Theoretical counts", data_mod["lambda"].sum()),
@@ -313,6 +251,38 @@ for sol_pair in [
 print_table("Equivalence Checks", pd.DataFrame(equivalence_rows))
 ```
 
+Each panel plots mean predicted claim count against exposure for one
+`(var1, var2)` cell. Black dots are the observed means. Nested markers keep
+all three formulations visible where they coincide. They coincide because
+the offset, the exposure weights, and the custom gradient share the
+estimating equations of @sec-poisson-offset-weight. Every line runs through
+the origin with slope $\nu=\lambda_{\mathrm{base}}$, since $\Lambda=e\nu$.
+
 ```{python}
-data_easy.head()
+solution_styles = {
+    "sol_1_predict": ("init_score (counts + offset)", "--", "^", 9, "#0072B2"),
+    "sol_2_predict": ("weights (rates x exposure)", ":", "s", 6, "#D55E00"),
+    "sol_3_predict": ("custom objective", "-.", "o", 3, "#009E73"),
+}
+
+fig, axes = plt.subplots(2, 2, figsize=(11, 8), sharex=True, sharey=True)
+for axis, ((var1, var2), cell) in zip(
+    axes.ravel(), data_easy.groupby(["var1", "var2"], observed=True)
+):
+    observed = cell.groupby("expos")["claim_count"].mean()
+    axis.plot(
+        observed.index, observed.values, "o", color="black", label="Observed", zorder=5
+    )
+    for column, (label, style, marker, size, color) in solution_styles.items():
+        means = cell.groupby("expos")[column].mean()
+        axis.plot(
+            means.index, means.values, style, marker=marker, markersize=size,
+            color=color, label=label,
+        )
+    axis.set_title(f"{var1} x {var2} (lambda_base = {cell['lambda_base'].iloc[0]})")
+    axis.set(xlabel="Exposure", ylabel="Mean claim count")
+axes[0, 0].legend(fontsize="small")
+fig.suptitle("Exposure scaling: the three Poisson formulations coincide")
+plt.tight_layout()
+plt.show()
 ```
