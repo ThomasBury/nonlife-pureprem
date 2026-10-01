@@ -1,12 +1,12 @@
 # Conditional diagnostics and chapter repair
 
-Updated: 2026-09-11.
+Updated: 2026-10-01.
 
 Read [PROGRESS.md](PROGRESS.md) for the handoff. Phases 1, 2, and 3 are
 implemented and verified, along with the subsequent repairs recorded below.
-The latest request has two editorial phases: common-English wording and
-precision, then learning-path improvements. Both editorial phases are now
-implemented and verified. Stop for review; do not publish.
+Both editorial phases and source repairs A–E are now implemented and
+verified. The source-repair scope and acceptance checks are recorded at the
+end of this plan. Stop for review; do not publish.
 
 ## Constraints
 
@@ -445,3 +445,125 @@ fresh full-data execution and rendered-output checks.
 Acceptance: validate heading links, mathematics, callouts, and rendered
 reading order. If executable cells move, verify their dependencies and
 refresh affected outputs. Record validation in PROGRESS.md and stop for review.
+
+## Repair the six source findings in five phases (2026-10-01)
+
+Phase A was completed separately. The user then explicitly authorized B–E
+together; all four are implemented and verified in the continuation session.
+See PROGRESS.md for actual validation. Stop for review. Historical sections
+above remain the record of prior work.
+Keep dependencies, model families, rating formula, splits, and tuning settings.
+Tutorial edits explain these repairs and update affected results only; the
+broader documentation and CI/CD audit is separate. Assume independent policy
+rows for inference; add no claim-level or clustered inference, compatibility
+aliases, or speculative interfaces.
+
+GLUM describes exposure as general risk volume, including time, money, and
+person-years; there is no documented requirement that it be a year fraction.
+Its weight-sum covariance correction does not establish the maintainers'
+motivation. Sources: [public documentation](https://glum.readthedocs.io/en/latest/glm.html)
+and [3.4.1 implementation](https://github.com/Quantco/glum/blob/v3.4.1/src/glum/_glm.py).
+
+| Phase | Repairs | Complexity / effort (1–5) | Status |
+| --- | --- | --- | --- |
+| A | Coefficient covariance and tutorial explanation | 3 / 2 | Implemented and verified; stopped for review |
+| B | Survival plots through the observed maximum | 1 / 2 | Implemented and verified |
+| C | Evaluation validation and undefined metrics | 2 / 2 | Implemented and verified |
+| D | Policy identifier and source-count validation | 1 / 1 | Implemented and verified |
+| E | Meaningful categorical relativities | 2 / 2 | Implemented and verified |
+
+### A. Correct covariance without changing actuarial targets or weights
+
+- Fit the unpenalized model in `fit_glum_inference` with original exposure or
+  claim-count weights, without covariance during `.fit()`.
+- Calculate and store covariance through the public `model.covariance_matrix`
+  API on the same eligible rows and targets, with `sample_weight=weight /
+  weight.mean()`, `robust=True`, and `dispersion=1`. The common dispersion
+  scalar cancels in the sandwich; it does not replace distribution dispersions.
+- Require more eligible rows than fitted coefficients, including the
+  intercept. Reject nonfinite covariance and materially negative variances
+  before exporting intervals.
+- Explain beside the tutorial confidence intervals that average-one
+  covariance weights make GLUM 3.4.1's small-sample adjustment count independent
+  policy rows. Original weights still define targets, totals, and distribution
+  parameters. Retain the chosen-unpenalized-specification limitation.
+
+Regression checks: years-to-days slope-uncertainty invariance; common weight
+scaling; unchanged fitted means; independently calculated Poisson sandwich
+with policy-row HC1; finite small-exposure output; clear row-count rejection.
+Quantify full-data standard-error changes and verify unchanged predictions.
+
+### B. Show the full observed positive tail
+
+- Replace the shared conditional diagnostic's 1st–99.5th percentile survival
+  grid with 128 logarithmic thresholds from the positive minimum to maximum.
+- Pad a constant positive sample to include its value. Preserve all-zero and
+  discrete-count behaviour, full probability denominators, weights, sampling,
+  and zero-mass calculations.
+- Inspect refreshed plots and update affected interpretations, identifying
+  the capped observable. Remove repeated title/axis assignments in `hexbin_grid`.
+
+Regression checks: rare EUR 100,000 observation included; heterogeneous weights
+and full denominators preserved; constant-positive and all-zero samples.
+
+### C. Validate evaluation inputs and define degenerate results
+
+- Evaluation, portfolio/grouped calibration, Lorenz, and Gini require aligned,
+  nonempty 1D arrays; reject column-shaped predictions without flattening.
+- Outcomes must be finite/nonnegative; risk weights finite/positive with a
+  finite total. Evaluation and calibration predictions must be positive and
+  finite; ranking scores may be any finite real value. Preserve positive
+  predictions for double-lift ratios and log-score examples.
+- Share only validation needed by actual callers. Calculate Gini from the
+  validated Lorenz curve with `numpy.trapezoid`; delete duplicate tied sorting.
+- Explicitly check constant outcomes and guard nonpositive null deviance.
+  Preserve metric column names; add a metric-guide sentence that a dash means
+  an undefined measure.
+
+| Situation | Result |
+| --- | --- |
+| Zero observed loss, positive predicted total | A/E = 0; percentage error = NaN |
+| All-zero outcomes | Model deviance defined; D² and both Ginis = NaN |
+| Constant positive outcomes | D² = NaN; raw Gini = 0; normalized Gini = NaN |
+| Empty eligible severity sample | Clear ValueError |
+| Invalid prediction shape, length, or values | ValueError before arithmetic |
+
+Regression checks: reject `(n, 1)` predictions, shortened ranking arrays,
+NaN, and infinity; all metric conventions; tied-score permutation invariance
+and Gini/Lorenz identity.
+
+### D. Validate identifiers before conversion and joining
+
+- Validate both `IDpol` columns as finite, integral, and representable by the
+  chosen integer dtype before casting. Accept numeric strings and integer-valued
+  floats; preserve integer precision without routing every value through float.
+- Retain duplicate detection after conversion. Validate source claim counts
+  as finite nonnegative integers before conversion. Preserve positive-claim
+  reconciliation and capping.
+
+Regression checks: fractional IDs cannot merge; valid numeric IDs unchanged;
+duplicate, nonfinite, out-of-range IDs and invalid source counts raise.
+
+### E. Keep categorical relativities and remove misleading interpretations
+
+- Preserve `coefficient_relativity_table`, columns, and CSV filenames.
+- Exponentiate coefficients/limits into relativity columns only for treatment
+  contrasts named `C(<feature>)[...]` for `CATEGORICAL_FEATURES`. Other rows
+  (intercept, splines, continuous terms) retain coefficient intervals and have
+  NaN relativity cells.
+- Explain omitted-reference-level comparisons holding other predictors fixed.
+  Age comparisons combine spline coefficients at two ages. Document the
+  recognition rule's limit for future interactions or different contrast coding.
+  Add no spline-effect plotting or contrast API.
+
+Regression checks: categorical exponentiation; noncategorical NaNs; coefficient
+and confidence-limit columns retained.
+
+### Verification for each phase
+
+Extend the existing test file with compact regressions. Run relevant checks,
+the full test suite, Ruff lint/format checks, and `git diff --check`. Run the
+CLI smoke when fitting or output behaviour changes. For tutorial computation
+changes, execute the full-data chapter afresh, refresh frozen outputs, inspect
+affected tables/figures, and assemble the book. Record actual results without
+marking future phases complete, preserve unrelated work, and stop for review.

@@ -1,6 +1,6 @@
 # Remediation handoff
 
-Updated: 2026-09-18.
+Updated: 2026-10-01.
 
 The completed phase scope and acceptance checks are in [PLAN.md](PLAN.md). Read that file and
 [AGENTS.md](AGENTS.md) before continuing after a context reset.
@@ -16,12 +16,15 @@ The completed phase scope and acceptance checks are in [PLAN.md](PLAN.md). Read 
 | Editorial 1: Common-English wording and precision | Implemented and verified | Preserve this work |
 | Editorial 2: Learning path | Implemented and verified | Preserve this work |
 | Tutorial review fixes (2026-09-18) | Implemented and verified | Stop for review |
+| Source repair A: Coefficient covariance (2026-10-01) | Implemented and verified | Stop for review |
+| Source repairs B–E | Implemented and verified | Stop for review |
 
-Both editorial phases are complete. The current session preserved the
-existing uncommitted Phase 1 edits and implemented Phase 2 in the chapter,
-refreshed its frozen outputs, and updated the handoff. No library, test,
-dependency, or book-configuration changes were needed. Nothing has been
-committed or published by this agent.
+The latest session completed source repairs B–E at the user's explicit
+request, preserved the uncommitted Phase A work, refreshed the tutorial's
+frozen outputs, and assembled the book. Historical phase records below remain intact.
+No dependency or book-configuration changes were needed. Nothing has been
+committed or published by this agent. All five source repair phases are ready
+for review.
 
 **Backward compatibility is not required.** Remove obsolete interfaces and
 migrate repository callers directly. Do not retain aliases, wrappers,
@@ -843,3 +846,239 @@ The render refreshed the tutorial's frozen outputs; no execution errors and no
 stderr cell outputs. The numeric results are unchanged (deviance 73.3357 and
 A/E 1.02016 for LightGBM frequency x severity; 73.6108 and 1.11671 for direct
 LightGBM Tweedie). Stop for review.
+
+## Source repair Phase A: Coefficient covariance (2026-10-01)
+
+Implemented and verified; stop for review. Phases B–E remain pending in
+PLAN.md. This session recorded the new plan after the historical sections.
+
+### Changes
+
+- `fit_glum_inference` fits the same unpenalized specification with original
+  exposure/claim-count weights. It then stores robust covariance through
+  GLUM's public API on the same eligible rows and targets, using average-one
+  weights and dispersion one. No coefficients are refitted for covariance.
+- The small-sample adjustment counts independent policy rows, including one
+  intercept coefficient in the parameter count. Insufficient rows raise a
+  clear ValueError, including when GLUM fails before coefficients exist.
+  Other fitting failures retain their original exception. Nonfinite covariance
+  or materially negative variances raise before interval output; negative
+  diagonal roundoff within 1e-12 of the largest absolute variance is clipped
+  to zero to keep square roots defined.
+- The tutorial explains this weight normalization beside the confidence
+  intervals, explicitly assumes independent policy rows, and separates the
+  cancelling covariance dispersion scalar from fitted distribution dispersions.
+  The chosen-unpenalized-specification limitation remains.
+- Three tests in the existing test file cover Poisson/Gamma/Tweedie weight
+  scaling, years-to-days slope uncertainty, unchanged means, normalized-fit
+  references, an independent Poisson sandwich with policy-row HC1, the real
+  spline/categorical formula, severity eligibility, small exposures, deficient
+  row counts, and invalid covariance. Only the unit-invariance regression
+  tightens solver convergence to isolate covariance from stopping tolerance;
+  production fitting settings are unchanged.
+
+GLUM 3.4.1 was verified in the installed environment. Context7 did not index
+GLUM after three resolution attempts; its official API documentation and the
+installed implementation confirmed the public covariance interface and the
+weight-sum correction. Context7's Quarto documentation confirmed fresh
+single-document execution and frozen whole-book assembly.
+
+### Full-data numerical comparison
+
+The fresh chapter selects Tweedie power **1.5**. Independent original-path
+fits with physical-weight covariance were compared with the repaired fits on
+the same training policies and formula. Each model has 67 coefficients,
+including the intercept.
+
+| Component | Eligible policy rows | Original weight sum | New / old standard errors | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Frequency | 542,410 | 286,898.635906 | 0.999944356–0.999944987 | about −0.0055% |
+| Severity | 19,955 | 21,146 | 1.000094867–1.000095009 | about +0.0095% |
+| Pure premium (p = 1.5) | 542,410 | 286,898.635906 | 0.999944984–0.999945431 | about −0.0055% |
+
+These ratios agree with the ratio of row-count and weight-sum HC1 corrections
+to relative tolerance 1e-6. The small spread reflects numerical matrix solves.
+Maximum absolute coefficient differences across independent fits are
+2.93e-8, 3.98e-9, and 4.88e-11 respectively. Maximum relative mean-prediction
+differences are 7.51e-12, 1.94e-12, and 1.82e-12. Covariance recalculation on
+each fixed fitted model leaves its predictions bit-for-bit unchanged. Thus
+the repair changes uncertainty, with fitted means unchanged to numerical
+precision. The small-exposure regression also gives finite output when total
+exposure is less than the number of coefficients.
+
+An older tracked artifact profile selects 1.9. The first comparison used
+that stale profile and was superseded by the 1.5 comparison above, using the
+fresh chapter's selected power. Historical `artifacts/pure_premium/` CSVs
+are unchanged; this phase refreshes the chapter's frozen outputs. Corrected
+full-data coefficient CSVs and the comparison JSON are available under
+`/tmp/pureprem-phase-a/`; the broader saved-artifact audit remains separate.
+
+### Validation
+
+Final complete run after the row-count repair:
+
+~~~sh
+env OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 .venv/bin/python -m pytest tests/ -q
+# 47 passed, 150 subtests passed in 26.53s
+.venv/bin/ruff check .
+# All checks passed!
+.venv/bin/ruff format --check .
+# 9 files already formatted
+git diff --check
+# Passed
+~~~
+
+CLI smoke completed successfully on 10,000 sampled policies with five alphas,
+30 boosting rounds, and five early-stopping rounds. It produced three
+coefficient CSVs (67 frequency, 59 severity, and 67 pure-premium rows), all
+numeric cells finite, tuning/profile CSVs, and all four core figures:
+
+~~~sh
+env OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 .venv/bin/pure-premium --n-samples 10000 --n-alphas 5 --max-rounds 30 --early-stopping-rounds 5 --output-dir /tmp/pureprem-phase-a/cli-smoke
+~~~
+
+Quarto 1.9.38 executed all 47 unchanged Python cells afresh with full data and
+a restarted kernel, then assembled all five book pages using frozen results:
+
+~~~sh
+env OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 QUARTO_PYTHON=/home/bsatom/Documents/nonlife-pureprem/.venv/bin/python quarto render book/pure_premium_tutorial.qmd --no-cache --execute-daemon-restart --log /tmp/pureprem-phase-a-tutorial-render.log
+env QUARTO_PYTHON=/home/bsatom/Documents/nonlife-pureprem/.venv/bin/python quarto render book --metadata-file /tmp/pureprem-phase-a-freeze.yml --log /tmp/pureprem-phase-a-book-render.log
+~~~
+
+Temporary assembly metadata sets only `execute.freeze: true`; repository
+configuration is unchanged. Sandbox launch failures were retried after
+escalation. Source/test diffs were reviewed; all 47 chapter Python cells are
+byte-for-byte unchanged and parse successfully. Rendered HTML contains the
+new covariance explanation and all 16 local images resolve. Frozen output
+has no stderr blocks. Only the coefficient tables and added prose change in
+displayed content; the other displayed numerical results are unchanged.
+LightGBM frequency x severity still gives deviance 73.3357 and A/E 1.02016;
+direct LightGBM Tweedie gives 73.6108 and 1.11671.
+
+Fifteen of 16 frozen figures have identical hashes. The remaining capped
+policy-total survival figure differs by one colour-channel level in 42 pixels;
+it was visually inspected and its curves, labels, and interpretation remain
+unchanged. Its fresh output is retained. Pre-render frozen outputs, comparison
+data, and cell-output diffs are under `/tmp/pureprem-phase-a/`; CLI and render
+logs are `/tmp/pureprem-phase-a-*.log`. No tail range or other later-phase
+repair was implemented. Stop here for review; nothing committed or published.
+
+## Source repair Phases B–E (2026-10-01)
+
+Implemented and verified together at the user's explicit request to continue
+through E. This supersedes the earlier B–E pending status. The starting tree
+contained the uncommitted Phase A implementation and frozen outputs; that work
+was preserved. No dependencies, rating formula, model settings, splits, or
+book configuration changed.
+
+### Repairs
+
+- **B:** Conditional severity and policy-total survival references now use
+  128 logarithmic thresholds from the positive sampled minimum to maximum.
+  Constant positive samples are padded around their value. Discrete counts,
+  all-zero samples, weights, full denominators, zero mass, and sampling remain
+  unchanged. Removed repeated hexbin titles and axis labels. The chapter
+  identifies the capped observables and explains full-range weighting.
+- **C:** Evaluation, portfolio/grouped calibration, Lorenz, and Gini share
+  validation for aligned, nonempty 1D outcomes and weights. Column-shaped,
+  short, nonfinite, and nonpositive mean predictions raise before scoring;
+  ranking accepts any finite real score. Outcomes must be finite/nonnegative,
+  weights finite/positive with a finite total. Gini integrates the validated
+  tie-aware Lorenz curve with `numpy.trapezoid`, deleting duplicate sorting.
+  Constant outcomes have undefined D2; positive constants have raw Gini zero
+  and undefined normalized Gini. Zero loss has defined model deviance, A/E
+  zero, and undefined D2, Ginis, and percentage error. Empty eligible severity
+  samples raise clearly. The metric guide explains the displayed dash.
+- **D:** Both identifier columns and source claim counts are checked before
+  int64 conversion or joining. Decimal parsing preserves integer/string
+  precision; integer-valued floats are checked before conversion. Fractional,
+  nonfinite, and out-of-range inputs raise, as do negative source counts.
+  Duplicate detection remains after conversion. Python integer summation
+  prevents overflow of the source-count audit total. Claim reconciliation,
+  filtering, and capping are unchanged.
+- **E:** Coefficient and confidence-limit columns and CSV filenames remain.
+  Relativity columns exponentiate only the current categorical main-effect
+  treatment names. Intercept, spline, continuous, interaction, unknown-feature,
+  and other-contrast rows have NaN relativity cells. The chapter explains
+  omitted-reference comparisons and combined spline effects for age changes.
+  The naming rule's limit is documented in prose and a `ponytail:` comment;
+  different coding or interactions require review. No contrast API was added.
+
+### Code and CLI validation
+
+Extended the existing suite with rare-maximum, heterogeneous-reference,
+constant/all-zero, invalid-array, degenerate-metric, identifier precision and
+int64 boundary, count, and categorical-output checks. Existing tied-score
+permutation and Gini/Lorenz identity regressions still pass. Intermediate full
+suites passed after B (49 tests), C (51), and D (52). Final verification:
+
+~~~sh
+uv sync --locked --all-groups
+# Resolved 131 packages; checked 128 packages
+env OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 .venv/bin/python -m pytest tests/ -q
+# 53 passed, 238 subtests passed in 33.34s; no warnings
+.venv/bin/ruff check .
+# All checks passed!
+.venv/bin/ruff format --check .
+# 9 files already formatted
+git diff --check
+# Passed
+env OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 .venv/bin/pure-premium --n-samples 10000 --n-alphas 5 --max-rounds 30 --early-stopping-rounds 5 --output-dir /tmp/pureprem-phases-b-e/cli-smoke
+~~~
+
+The CLI completed and produced tuning/profile CSVs, all three coefficient
+CSVs, and four core figures. Numeric coefficient/interval cells are finite;
+noncategorical relativity cells are blank and categorical cells match
+exponentiation. Frequency and pure premium each have 67 coefficient rows,
+48 categorical; sampled severity has 59 rows, 40 categorical.
+
+### Fresh full-data book verification
+
+All 47 Python chapter cells are byte-for-byte unchanged from HEAD and parse.
+Context7's official Quarto documentation confirmed that a single-document
+render executes despite project freeze, while `freeze: true` supports whole-
+book assembly without repeating computation. Quarto 1.9.38 executed every
+chapter cell afresh on all 678,013 policies with unchanged full-data tuning
+settings and a restarted kernel, then assembled all five book pages:
+
+~~~sh
+env OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 QUARTO_PYTHON=/home/bsatom/Documents/nonlife-pureprem/.venv/bin/python quarto render book/pure_premium_tutorial.qmd --no-cache --execute-daemon-restart --log /tmp/pureprem-phases-b-e-render.log
+env QUARTO_PYTHON=/home/bsatom/Documents/nonlife-pureprem/.venv/bin/python quarto render book --metadata-file /tmp/pureprem-phases-b-e-freeze.yml --log /tmp/pureprem-phases-b-e-book-render.log
+~~~
+
+Assembly metadata sets only `execute.freeze: true`; repository configuration
+is unchanged. Sandbox launch failures were retried after escalation. An
+interim B render was interrupted and is superseded by this completed run.
+
+The preparation audit still reports 36,102 source claims, 26,444 positive
+claim records, 9,117 mismatching policies, and 1,224 capped exposures.
+Training contains 542,410 policies. Severity uses all 19,955 eligible
+training policies, with positive range EUR 1–100,000; pure-premium diagnostics
+use 20,000 policies, with positive capped-total range EUR 6.52–100,000.
+Frequency uses 20,000 policies and retains its discrete grid.
+
+Visually inspected both refreshed survival figures: the full upper ranges
+are visible, labels identify capped policy-average severity and capped policy
+totals, and existing Gamma/Tweedie upper-tail interpretations remain supported.
+Only those two figures changed; the other 14 have identical content hashes
+to the pre-session outputs. Log survival omits the zero-probability endpoint
+from view, while the grid and empirical data include the maximum.
+
+All 11 stdout blocks are unchanged. Comparing the extracted display blocks
+identifies only the three coefficient tables as changed; their noncategorical
+relativities now display dashes. Fresh source reveals contain the repaired
+Lorenz/Gini implementation. Selected power remains 1.5; LightGBM frequency x
+severity still gives deviance 73.3357 and A/E 1.02016, versus 73.6108 and
+1.11671 for direct LightGBM Tweedie. Raw/log prediction Gini remains 0.327742.
+Frozen output has no stderr blocks. Rendered HTML includes the repaired
+explanations; all 16 local images and internal anchors resolve. This includes
+visual inspection of the affected plots and an HTML structure check, not a
+browser screenshot review.
+
+Prior frozen results, display diffs, CLI outputs, and data-scope JSON are under
+`/tmp/pureprem-phases-b-e/`. Historical `artifacts/pure_premium/` exports remain
+unchanged; the broader saved-artifact audit is separate. The tracked tutorial
+freeze is refreshed, and generated `_book` content remains untracked.
+
+All source repairs A–E are implemented and verified. Stop for review;
+nothing committed or published.
