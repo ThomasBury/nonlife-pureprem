@@ -118,6 +118,10 @@ EUR 100,000, cap exposure at one year, aggregate claims to policy level, and
 construct the three targets. Claim counts come from the positive claim
 records, not the source `ClaimNb`, so frequency and pure premium share one
 claim set; the structural audit reports both totals and the disagreeing rows.
+Both policy identifier columns must contain finite integers within the int64
+range before conversion or joining. Numeric strings and integer-valued floats
+are accepted; fractional identifiers are rejected. Source claim counts must
+also be finite nonnegative integers.
 
 Reconcile source claim counts with claim records, document the caps before
 fitting, and use exposure for frequency and pure premium but claim count for
@@ -556,13 +560,38 @@ show_source(select_tweedie_power)
 
 The GLUM benchmark lets us judge whether a flexible model earns its extra
 complexity. Fit a regularized model, which penalizes coefficient size, for
-prediction. Fit a separate unregularized model for coefficient relativities
-(the multiplicative effects on the predicted rate) and sandwich standard
+prediction. Fit a separate unregularized model for coefficient intervals,
+categorical relativities (multiplicative effects on the predicted rate), and sandwich standard
 errors, which allow the variance to differ from the working distribution.
+
+For each categorical term, the relativity compares that level with the
+omitted reference level while holding other predictors fixed. The intercept,
+continuous terms, and individual spline coefficients keep their coefficient
+intervals but have blank relativity cells. Comparing two ages requires
+combining all spline coefficients with the difference between the spline
+basis values at those ages, then exponentiating that combined log-rate change.
+An individual spline coefficient is not an age relativity.
+
+The table recognizes main-effect treatment terms named `C(<feature>)[...]`
+for `VehBrand`, `VehPower`, `VehGas`, `Region`, and `Area`. This rule must be
+reviewed if the formula adds interactions or uses different contrast coding.
 
 The unregularized model's confidence intervals describe that fit. They do
 not apply to the penalized predictive fit. Review relativities for
 plausibility and choose predictions using out-of-sample evidence.
+
+Exposure and claim count determine each policy's weight in fitting. The
+standard-error calculation also needs the number of independent policy rows.
+GLUM 3.4.1 uses total weight in its small-sample adjustment, so we calculate
+covariance with a copy of the weights rescaled to average one. This preserves
+their relative values and the fitted means, while making the adjustment use
+the number of policy rows. Original exposures and claim counts still define
+the targets, totals, and distribution parameters.
+
+This inference assumes independence between policy rows. We set dispersion
+to one only for the sandwich calculation: its common scalar cancels between
+the information matrix and score contributions. The fitted distribution
+dispersions remain separate.
 
 `fit_glum_predictive` uses 3-fold cross-validation to compare penalty
 strengths $\alpha$ and penalty mixtures $\mathrm{l1\_ratio}$ (0 for ridge,
@@ -765,6 +794,8 @@ between the two references, while both references overstate the farther tail.
 The curves show the probability that capped policy-average severity exceeds
 each amount, using claim-count weights. The Gamma reference accounts for
 claim count through its policy-specific shape and scale.
+The 128 logarithmic thresholds run from the smallest positive sampled
+severity to its maximum; probabilities retain the full claim-count denominator.
 
 ```{python}
 #| label: severity-sf
@@ -779,6 +810,8 @@ part of the middle tail, and then decays too quickly to reproduce the upper tail
 The curves show the probability that a capped policy total exceeds each
 amount, using exposure weights. The Tweedie reference converts fitted
 pure-premium rates to policy totals and uses exposure-adjusted dispersion.
+The 128 logarithmic thresholds cover the full positive sampled range, with
+all sampled exposure retained in the probability denominator, including zero-loss policies.
 
 ```{python}
 #| label: pure-premium-sf
@@ -990,7 +1023,10 @@ weighting convention; compare deviance and D2 at the same family and power.
 | `raw_gini` | Ranking of observed losses by predicted rate | Higher positive values indicate better ranking | Rescaling predictions can change totals without changing ranks. |
 | `normalized_gini` | Raw Gini divided by Gini from ordering on observed outcomes | 1 matches that observed-outcome ordering | Uses the same outcomes and weights as its denominator; it does not measure calibration. |
 
-The following sections examine calibration and ranking in more detail.
+A dash means the measure is undefined: D2 for constant outcomes, both Ginis
+for zero loss, normalized Gini for constant positive outcomes, and percentage
+error when observed loss is zero. A/E is zero when loss is zero and predictions
+are positive. The following sections examine calibration and ranking in more detail.
 
 ```{python}
 for component, predictions in (
