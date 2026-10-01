@@ -24,6 +24,7 @@ in book/theory.qmd.
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal, InvalidOperation
 from itertools import combinations
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -125,6 +126,33 @@ def target_weight_table() -> pd.DataFrame:
     )
 
 
+def _validated_integer_column(
+    values: pd.Series, name: str, *, nonnegative: bool = False
+) -> pd.Series:
+    """Check exact integers before int64 conversion, including numeric strings."""
+    bounds = np.iinfo(np.int64)
+    minimum = 0 if nonnegative else int(bounds.min)
+    message = f"{name} must contain finite {'nonnegative ' if nonnegative else ''}integers representable as int64"
+    integers = []
+    for value in values:
+        if isinstance(value, (float, np.floating)):
+            if not np.isfinite(value) or value != np.floor(value):
+                raise ValueError(message)
+            value = int(value)
+        try:
+            number = Decimal(str(value))
+        except InvalidOperation as error:
+            raise ValueError(message) from error
+        if (
+            not number.is_finite()
+            or number != number.to_integral_value()
+            or not minimum <= number <= int(bounds.max)
+        ):
+            raise ValueError(message)
+        integers.append(int(number))
+    return pd.Series(integers, index=values.index, dtype=np.int64)
+
+
 def prepare_mtpl_data(
     frequency: pd.DataFrame,
     severity: pd.DataFrame,
@@ -153,7 +181,7 @@ def prepare_mtpl_data(
         raise ValueError("claim_cap must be finite and positive")
 
     policies = frequency.copy()
-    policies["IDpol"] = policies["IDpol"].astype(int)
+    policies["IDpol"] = _validated_integer_column(policies["IDpol"], "frequency IDpol")
     if policies["IDpol"].duplicated().any():
         raise ValueError("Frequency data must contain one row per IDpol")
     policies = policies.set_index("IDpol")
@@ -167,12 +195,12 @@ def prepare_mtpl_data(
     exposure_capped_rows = int((policies["Exposure"] > 1).sum())
     policies["Exposure"] = policies["Exposure"].clip(upper=1)
     policies = policies.rename(columns={"ClaimNb": "SourceClaimNb"})
-    policies["SourceClaimNb"] = pd.to_numeric(
-        policies["SourceClaimNb"], errors="raise"
-    ).astype(int)
+    policies["SourceClaimNb"] = _validated_integer_column(
+        policies["SourceClaimNb"], "SourceClaimNb", nonnegative=True
+    )
 
     claims = severity.copy()
-    claims["IDpol"] = claims["IDpol"].astype(int)
+    claims["IDpol"] = _validated_integer_column(claims["IDpol"], "severity IDpol")
     claims = claims[claims["IDpol"].isin(policies.index)]
     amounts = pd.to_numeric(claims["ClaimAmount"], errors="coerce").to_numpy(
         dtype=float
@@ -216,7 +244,7 @@ def prepare_mtpl_data(
     report: dict[str, int | float] = {
         "policies": len(policies),
         "claim_cap": claim_cap,
-        "source_claims": int(policies["SourceClaimNb"].sum()),
+        "source_claims": sum(policies["SourceClaimNb"]),
         "claim_records": int(policies["ClaimNb"].sum()),
         "exposure_capped_rows": exposure_capped_rows,
         "claim_count_mismatch_rows": int(
@@ -537,14 +565,11 @@ def _conditional_diagnostic(
     if component == "frequency":
         grid = np.floor(np.linspace(0, values.max() + 1, 128))
     elif survival and np.any(values > 0):
-        positive = values > 0
-        lower, upper = np.quantile(
-            values[positive],
-            [0.01, 0.995],
-            weights=weight[positive],
-            method="inverted_cdf",
-        )
-        grid = np.geomspace(lower, max(upper, lower * 1.01), 128)
+        positive = values[values > 0]
+        lower, upper = positive.min(), positive.max()
+        if lower == upper:
+            lower, upper = lower / 1.01, upper * 1.01
+        grid = np.geomspace(lower, upper, 128)
     elif component == "severity":
         grid = np.geomspace(values.min() / 2, values.max() * 1.5, 128)
     else:
@@ -918,7 +943,7 @@ def fit_glum_inference(
     component: str,
     tweedie_power: float,
 ) -> GeneralizedLinearRegressor:
-    """Fit a separate unregularized GLUM for classical robust inference."""
+    """Fit unregularized means and robust covariance for independent policy rows."""
     rows, target, weight = target_and_weight(data, component)
     rows = rows.copy()
     for column in CATEGORICAL_FEATURES:
@@ -932,25 +957,59 @@ def fit_glum_inference(
         robust=True,
         max_iter=200,
     )
-    return model.fit(
+    row_count_error = (
+        "Robust inference requires more eligible policy rows than fitted "
+        "coefficients (including the intercept)"
+    )
+    try:
+        model.fit(rows, target, sample_weight=weight)
+    except (ValueError, np.linalg.LinAlgError) as error:
+        # A deficient design can fail during fitting, before coefficients exist.
+        n_features = getattr(model, "n_features_in_", None)
+        if n_features is None or len(rows) > n_features + int(model.fit_intercept):
+            raise
+        raise ValueError(row_count_error) from error
+    n_coefficients = model.coef_.size + int(model.fit_intercept)
+    if len(rows) <= n_coefficients:
+        raise ValueError(row_count_error)
+    # GLUM 3.4.1 uses total weight for HC1; average-one weights count policy rows.
+    # Dispersion is a common scalar that cancels in the robust sandwich.
+    covariance = model.covariance_matrix(
         rows,
         target,
-        sample_weight=weight,
+        sample_weight=weight / weight.mean(),
+        robust=True,
+        dispersion=1,
         store_covariance_matrix=True,
     )
+    if not np.all(np.isfinite(covariance)):
+        raise ValueError("Robust covariance must be finite")
+    variances = np.diag(covariance)
+    tolerance = 1e-12 * np.max(np.abs(variances))
+    if np.any(variances < -tolerance):
+        raise ValueError("Robust covariance has materially negative variances")
+    np.fill_diagonal(covariance, np.maximum(variances, 0))
+    return model
 
 
 def coefficient_relativity_table(
     model: GeneralizedLinearRegressor,
 ) -> pd.DataFrame:
-    """Return compact classical coefficient and pricing-relativity output."""
+    """Return coefficient intervals and main-effect categorical relativities."""
     table = model.coef_table().rename_axis("term").reset_index()
     table = table[["term", "coef", "se", "p_value", "ci_lower", "ci_upper"]].rename(
         columns={"se": "std_error"}
     )
-    table["relativity"] = np.exp(table["coef"].clip(-700, 700))
-    table["relativity_lower"] = np.exp(table["ci_lower"].clip(-700, 700))
-    table["relativity_upper"] = np.exp(table["ci_upper"].clip(-700, 700))
+    # ponytail: main-effect treatment names only; revisit if formula coding changes.
+    categorical = table["term"].str.fullmatch(
+        r"C\((?:" + "|".join(CATEGORICAL_FEATURES) + r")\)\[[^\]]+\]"
+    )
+    for output, source in (
+        ("relativity", "coef"),
+        ("relativity_lower", "ci_lower"),
+        ("relativity_upper", "ci_upper"),
+    ):
+        table[output] = np.exp(table[source].where(categorical).clip(-700, 700))
     return table
 
 
@@ -1240,6 +1299,36 @@ def fit_lightgbm(
     return final, tuning
 
 
+def _validated_observations(
+    target: np.ndarray, weight: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate eligible outcomes and their risk weights before arithmetic."""
+    target, weight = np.asarray(target, dtype=float), np.asarray(weight, dtype=float)
+    if target.ndim != 1 or target.size == 0 or target.shape != weight.shape:
+        raise ValueError("outcomes and weights must be aligned nonempty 1D arrays")
+    if np.any(~np.isfinite(target) | (target < 0)):
+        raise ValueError("outcomes must be finite and nonnegative")
+    if np.any(~np.isfinite(weight) | (weight <= 0)) or not np.isfinite(weight.sum()):
+        raise ValueError("risk weights must be finite and positive with a finite total")
+    return target, weight
+
+
+def _validated_prediction(
+    prediction: np.ndarray, target: np.ndarray, *, ranking: bool = False
+) -> np.ndarray:
+    """Ranking accepts any finite score; mean predictions must also be positive."""
+    prediction = np.asarray(prediction, dtype=float)
+    if prediction.ndim != 1 or prediction.shape != target.shape:
+        raise ValueError("prediction shape and length must match the 1D outcomes")
+    if np.any(~np.isfinite(prediction)) or (not ranking and np.any(prediction <= 0)):
+        raise ValueError(
+            "ranking scores must be finite"
+            if ranking
+            else "non-finite or non-positive predictions"
+        )
+    return prediction
+
+
 def lorenz_curve(
     y_true_rate: np.ndarray,
     y_pred_rate: np.ndarray,
@@ -1252,11 +1341,8 @@ def lorenz_curve(
     straight line across the tied block (the standard convention when
     average ranks are used).
     """
-    y_true_rate = np.asarray(y_true_rate, dtype=float)
-    y_pred_rate = np.asarray(y_pred_rate, dtype=float)
-    weight = np.asarray(weight, dtype=float)
-    if np.any(weight <= 0) or weight.sum() <= 0:
-        raise ValueError("Lorenz weights must be positive")
+    y_true_rate, weight = _validated_observations(y_true_rate, weight)
+    y_pred_rate = _validated_prediction(y_pred_rate, y_true_rate, ranking=True)
     order = np.argsort(y_pred_rate, kind="stable")
     sorted_pred = y_pred_rate[order]
     sorted_weight = weight[order]
@@ -1268,6 +1354,8 @@ def lorenz_curve(
     cumulative_loss = np.r_[0.0, np.cumsum(block_observed)]
     cumulative_weight /= cumulative_weight[-1]
     if cumulative_loss[-1] > 0:
+        if np.all(y_true_rate == y_true_rate[0]):
+            return cumulative_weight, cumulative_weight.copy()
         cumulative_loss /= cumulative_loss[-1]
     return cumulative_weight, cumulative_loss
 
@@ -1279,19 +1367,23 @@ def portfolio_calibration_table(
 ) -> pd.DataFrame:
     """Compare observed and predicted portfolio totals for one response."""
     _, target, weight = target_and_weight(data, component)
+    target, weight = _validated_observations(target, weight)
     observed_total = float(np.sum(target * weight))
     records = []
     for model, prediction in predictions.items():
-        predicted_total = float(np.sum(np.asarray(prediction, dtype=float) * weight))
+        prediction = _validated_prediction(prediction, target)
+        predicted_total = float(np.sum(prediction * weight))
         records.append(
             {
                 "model": model,
                 "observed_total": observed_total,
                 "predicted_total": predicted_total,
                 "actual_expected": observed_total / predicted_total,
-                "signed_percentage_error": 100
-                * (predicted_total - observed_total)
-                / observed_total,
+                "signed_percentage_error": (
+                    100 * (predicted_total - observed_total) / observed_total
+                    if observed_total > 0
+                    else np.nan
+                ),
             }
         )
     return pd.DataFrame(records).set_index("model")
@@ -1329,38 +1421,17 @@ def gini(
     y_pred_rate: np.ndarray,
     weight: np.ndarray,
 ) -> float:
-    """Compute the weighted Gini coefficient for a low-to-high ordering.
+    """Twice the signed area between the diagonal and validated Lorenz curve.
 
-    Uses the average-rank (midrank) closed form
-
-        G = 2 * sum_i (w_i y_i Fbar_i) / sum_i (w_i y_i) - 1,
-        Fbar_i = (W_{i-1} + w_i / 2) / W,
-
-    which is the Frees-Meyers-Cummings convention. Tied predictions are
-    aggregated into single blocks so the value is permutation-invariant;
-    the resulting Gini equals 1 - 2 * AUC of the tie-corrected polygonal
-    Lorenz curve. Returns ``numpy.nan`` when total weighted loss is not
-    positive (no average can be defined).
+    Tied scores share a straight segment. Zero loss has undefined Gini;
+    constant positive outcomes have Gini zero.
     """
-    y_true_rate = np.asarray(y_true_rate, dtype=float)
-    y_pred_rate = np.asarray(y_pred_rate, dtype=float)
-    weight = np.asarray(weight, dtype=float)
-    if np.any(weight <= 0) or weight.sum() <= 0:
-        raise ValueError("Gini weights must be positive")
-    order = np.argsort(y_pred_rate, kind="stable")
-    sorted_pred = y_pred_rate[order]
-    sorted_weight = weight[order]
-    sorted_observed = y_true_rate[order]
-    _, starts = np.unique(sorted_pred, return_index=True)
-    block_weight = np.add.reduceat(sorted_weight, starts)
-    block_weighted_y = np.add.reduceat(sorted_weight * sorted_observed, starts)
-    total_weight = block_weight.sum()
-    total_loss = block_weighted_y.sum()
-    if total_loss <= 0:
+    cumulative_weight, cumulative_loss = lorenz_curve(y_true_rate, y_pred_rate, weight)
+    if cumulative_loss[-1] <= 0:
         return float("nan")
-    cumulative_weight = np.cumsum(block_weight)
-    f_mid = (cumulative_weight - block_weight / 2) / total_weight
-    return float(2.0 * (block_weighted_y * f_mid).sum() / total_loss - 1.0)
+    return float(
+        2 * np.trapezoid(cumulative_weight - cumulative_loss, cumulative_weight)
+    )
 
 
 def exposure_balanced_lift_table(
@@ -1515,19 +1586,22 @@ def evaluate_predictions(
     tweedie_power: float,
 ) -> pd.DataFrame:
     """Report weighted deviance, D2, A/E, raw Gini, and normalized Gini."""
-    rows, target, weight = target_and_weight(data, component)
-    null_prediction = np.full_like(target, np.average(target, weights=weight))
-    null_deviance = weighted_mean_deviance(
-        target, null_prediction, weight, component, tweedie_power
-    )
+    _, target, weight = target_and_weight(data, component)
+    target, weight = _validated_observations(target, weight)
+    predictions = {
+        name: _validated_prediction(prediction, target)
+        for name, prediction in predictions.items()
+    }
+    constant_outcomes = np.all(target == target[0])
+    null_deviance = 0.0
+    if not constant_outcomes:
+        null_prediction = np.full_like(target, np.average(target, weights=weight))
+        null_deviance = weighted_mean_deviance(
+            target, null_prediction, weight, component, tweedie_power
+        )
     perfect_gini = gini(target, target, weight)
     results = []
     for name, prediction in predictions.items():
-        prediction = np.asarray(prediction, dtype=float)
-        if len(prediction) != len(rows):
-            raise ValueError(f"{name} prediction length does not match evaluation rows")
-        if not np.all(np.isfinite(prediction) & (prediction > 0)):
-            raise ValueError(f"{name} produced non-finite or non-positive predictions")
         deviance = weighted_mean_deviance(
             target, prediction, weight, component, tweedie_power
         )
@@ -1536,12 +1610,12 @@ def evaluate_predictions(
             {
                 "model": name,
                 "weighted_deviance": deviance,
-                "D2": 1 - deviance / null_deviance,
+                "D2": 1 - deviance / null_deviance if null_deviance > 0 else np.nan,
                 "actual_expected": np.sum(weight * target)
                 / np.sum(weight * prediction),
                 "raw_gini": raw_gini,
                 "normalized_gini": (
-                    raw_gini / perfect_gini if perfect_gini != 0 else np.nan
+                    raw_gini / perfect_gini if perfect_gini > 0 else np.nan
                 ),
             }
         )
@@ -1556,10 +1630,11 @@ def grouped_calibration(
 ) -> pd.DataFrame:
     """Aggregate observed and predicted component rates by driver-age bands."""
     rows, target, weight = target_and_weight(data, component)
+    target, weight = _validated_observations(target, weight)
     bands = pd.qcut(rows["DrivAge"], n_bins, duplicates="drop")
     frame = pd.DataFrame({"band": bands, "weight": weight, "observed": target * weight})
     for name, prediction in predictions.items():
-        frame[name] = np.asarray(prediction) * weight
+        frame[name] = _validated_prediction(prediction, target) * weight
     grouped = frame.groupby("band", sort=True, observed=True).sum()
     rate_columns = ["observed", *predictions]
     grouped[rate_columns] = grouped[rate_columns].div(grouped["weight"], axis=0)
@@ -1760,9 +1835,6 @@ def hexbin_grid(
             extent=extent,
         )
         artists.append(hb)
-        axis.set_title(name)
-        axis.set_xlabel(xlabel)
-        axis.set_ylabel(ylabel)
         if reference == "diag":
             if extent is not None:
                 ref_lo, ref_hi = max(xlo, extent[2]), min(xhi, extent[3])

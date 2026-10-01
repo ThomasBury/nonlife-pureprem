@@ -21,15 +21,18 @@ from scipy.special import logsumexp
 from scipy.stats import gamma, nbinom, ncx2, poisson
 
 from nonlife_pureprem.pure_premium import (
+    CATEGORICAL_FEATURES,
     CONSOLE,
     _set_log_y_observed_floor,
     cli,
+    coefficient_relativity_table,
     conditional_dispersion_diagnostic,
     conditional_dispersion_table,
     evaluate_predictions,
     exposure_balanced_double_lift_table,
     exposure_balanced_lift_table,
     fit_gamma_dispersion,
+    fit_glum_inference,
     fit_glum_predictive,
     fit_negative_binomial_shape,
     fit_tweedie_dispersion,
@@ -126,6 +129,73 @@ class PurePremiumTutorialTest(unittest.TestCase):
             self.report["capped_loss_share"],
             (450_000 - 280_000) / 450_000,
         )
+
+    def test_identifier_and_source_count_validation_before_conversion(self) -> None:
+        large_id = 2**53 + 1
+        frequency = pd.DataFrame(
+            {
+                "IDpol": pd.Series([large_id, "2", 3.0], dtype=object),
+                "ClaimNb": ["1", 0.0, 2],
+                "Exposure": [1.0, 0.5, 0.2],
+                "Density": [10, 20, 30],
+            }
+        )
+        severity = pd.DataFrame(
+            {"IDpol": [str(large_id), "3.0"], "ClaimAmount": [100, 200]}
+        )
+        policies, claims, report = prepare_mtpl_data(frequency, severity)
+        np.testing.assert_array_equal(policies.index, [large_id, 2, 3])
+        np.testing.assert_array_equal(claims.IDpol, [large_id, 3])
+        np.testing.assert_array_equal(policies.SourceClaimNb, [1, 0, 2])
+        self.assertEqual(report["source_claims"], 3)
+        for invalid in (
+            1.5,
+            "1.5",
+            np.nan,
+            np.inf,
+            -np.inf,
+            2**63,
+            -(2**63) - 1,
+            "bad",
+            None,
+        ):
+            for side in ("frequency", "severity"):
+                bad_frequency, bad_severity = frequency.copy(), severity.copy()
+                bad = bad_frequency if side == "frequency" else bad_severity
+                bad["IDpol"] = bad["IDpol"].astype(object)
+                bad.loc[0, "IDpol"] = invalid
+                with (
+                    self.subTest(side=side, invalid=invalid),
+                    self.assertRaisesRegex(ValueError, "IDpol"),
+                ):
+                    prepare_mtpl_data(bad_frequency, bad_severity)
+        for invalid in (-1, 1.5, "1.5", np.nan, np.inf, 2**63, "bad", None):
+            bad = frequency.copy()
+            bad.loc[0, "ClaimNb"] = invalid
+            with (
+                self.subTest(count=invalid),
+                self.assertRaisesRegex(ValueError, "SourceClaimNb"),
+            ):
+                prepare_mtpl_data(bad, severity)
+        duplicate = frequency.copy()
+        duplicate["IDpol"] = ["2", 2.0, 3]
+        with self.assertRaisesRegex(ValueError, "one row per IDpol"):
+            prepare_mtpl_data(duplicate, severity)
+        float_id = np.nextafter(float(2**63), 0)
+        boundary = frequency.copy()
+        boundary["IDpol"] = pd.Series(
+            [2**63 - 1, str(2**63 - 2), float_id], dtype=object
+        )
+        boundary["ClaimNb"] = [2**63 - 1, 2**63 - 1, 0]
+        policies, _, report = prepare_mtpl_data(boundary, severity.iloc[:0])
+        np.testing.assert_array_equal(
+            policies.index, [2**63 - 1, 2**63 - 2, int(float_id)]
+        )
+        self.assertEqual(report["source_claims"], 2 * (2**63 - 1))
+        boundary = frequency.iloc[:1].copy()
+        boundary["IDpol"] = -(2**63)
+        policies, _, _ = prepare_mtpl_data(boundary, severity.iloc[:0])
+        self.assertEqual(policies.index[0], -(2**63))
 
     def test_targets_reconstruct_capped_totals(self) -> None:
         np.testing.assert_allclose(
@@ -394,6 +464,16 @@ class PurePremiumTutorialTest(unittest.TestCase):
         )
         self.assertEqual(list(result.index), ["constant"])
         self.assertTrue(np.isfinite(result.to_numpy()).all())
+        with (
+            patch(
+                "nonlife_pureprem.pure_premium.weighted_mean_deviance",
+                side_effect=AssertionError("validate before scoring"),
+            ),
+            self.assertRaisesRegex(ValueError, "shape"),
+        ):
+            evaluate_predictions(
+                self.data, "frequency", {"bad": prediction[:, None]}, 1.5
+            )
 
         with self.assertRaisesRegex(ValueError, "length"):
             evaluate_predictions(
@@ -415,6 +495,177 @@ class PurePremiumTutorialTest(unittest.TestCase):
                     {"bad": bad},
                     tweedie_power=1.5,
                 )
+
+    def test_evaluation_and_calibration_validate_inputs(self) -> None:
+        target = np.array([0.0, 2.0, 4.0])
+        weight = np.array([0.2, 0.5, 1.0])
+        data = pd.DataFrame(
+            {"PurePremium": target, "Exposure": weight, "DrivAge": [20, 40, 60]}
+        )
+        for prediction in (
+            np.ones((3, 1)),
+            np.ones(2),
+            np.array([1, np.nan, 2]),
+            np.array([1, np.inf, 2]),
+        ):
+            for operation in (
+                lambda prediction=prediction: evaluate_predictions(
+                    data, "pure_premium", {"m": prediction}, 1.5
+                ),
+                lambda prediction=prediction: portfolio_calibration_table(
+                    data, "pure_premium", {"m": prediction}
+                ),
+                lambda prediction=prediction: grouped_calibration(
+                    data, "pure_premium", {"m": prediction}
+                ),
+                lambda prediction=prediction: lorenz_curve(target, prediction, weight),
+                lambda prediction=prediction: gini(target, prediction, weight),
+            ):
+                with (
+                    self.subTest(prediction=prediction, operation=operation),
+                    self.assertRaises(ValueError),
+                ):
+                    operation()
+        for column, invalid in (
+            ("PurePremium", [0, -1, 2]),
+            ("PurePremium", [0, np.nan, 2]),
+            ("PurePremium", [0, np.inf, 2]),
+            ("Exposure", [1, 0, 1]),
+            ("Exposure", [1, -1, 1]),
+            ("Exposure", [1, np.nan, 1]),
+            ("Exposure", [1, np.inf, 1]),
+            ("Exposure", [1e308, 1e308, 1e308]),
+        ):
+            bad = data.assign(**{column: invalid})
+            with np.errstate(over="ignore"):
+                for operation in (
+                    lambda bad=bad: evaluate_predictions(
+                        bad, "pure_premium", {"m": np.ones(3)}, 1.5
+                    ),
+                    lambda bad=bad: portfolio_calibration_table(
+                        bad, "pure_premium", {"m": np.ones(3)}
+                    ),
+                    lambda bad=bad: grouped_calibration(
+                        bad, "pure_premium", {"m": np.ones(3)}
+                    ),
+                    lambda bad=bad: lorenz_curve(
+                        bad.PurePremium, np.ones(3), bad.Exposure
+                    ),
+                    lambda bad=bad: gini(bad.PurePremium, np.ones(3), bad.Exposure),
+                ):
+                    with (
+                        self.subTest(column=column, invalid=invalid),
+                        self.assertRaises(ValueError),
+                    ):
+                        operation()
+        for prediction in (np.array([1, 0, 2]), np.array([1, -1, 2])):
+            for operation in (
+                lambda prediction=prediction: evaluate_predictions(
+                    data, "pure_premium", {"m": prediction}, 1.5
+                ),
+                lambda prediction=prediction: portfolio_calibration_table(
+                    data, "pure_premium", {"m": prediction}
+                ),
+                lambda prediction=prediction: grouped_calibration(
+                    data, "pure_premium", {"m": prediction}
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    operation()
+            self.assertTrue(np.isfinite(gini(target, prediction, weight)))
+        for target, score, weight in (
+            ([], [], []),
+            ([[0], [1]], [0, 1], [1, 1]),
+            ([0, 1], [0, 1], [[1], [1]]),
+        ):
+            for operation in (lorenz_curve, gini):
+                with self.assertRaises(ValueError):
+                    operation(target, score, weight)
+
+    def test_undefined_metrics_for_zero_constant_and_empty_outcomes(self) -> None:
+        for component in ("frequency", "pure_premium", "severity"):
+            data = pd.DataFrame(
+                {
+                    "Frequency": [2.0, 2.0, 2.0],
+                    "PurePremium": [2.0, 2.0, 2.0],
+                    "Severity": [2.0, 2.0, 2.0],
+                    "Exposure": [0.2, 0.5, 1.0],
+                    "ClaimNb": [1, 2, 1],
+                    "DrivAge": [20, 40, 60],
+                }
+            )
+            prediction = np.array([1.0, 3.0, 4.0])
+            result = evaluate_predictions(data, component, {"m": prediction}, 1.5).loc[
+                "m"
+            ]
+            self.assertTrue(np.isnan(result.D2))
+            self.assertEqual(result.raw_gini, 0)
+            self.assertTrue(np.isnan(result.normalized_gini))
+            if component != "severity":
+                data[["Frequency", "PurePremium"]] = 0
+                result = evaluate_predictions(
+                    data, component, {"m": prediction}, 1.5
+                ).loc["m"]
+                self.assertTrue(np.isfinite(result.weighted_deviance))
+                self.assertTrue(
+                    np.isnan(result[["D2", "raw_gini", "normalized_gini"]]).all()
+                )
+                self.assertEqual(result.actual_expected, 0)
+                calibration = portfolio_calibration_table(
+                    data, component, {"m": prediction}
+                ).loc["m"]
+                self.assertEqual(calibration.actual_expected, 0)
+                self.assertTrue(np.isnan(calibration.signed_percentage_error))
+            data["ClaimNb"] = 0
+            for operation in (
+                lambda data=data: evaluate_predictions(
+                    data, "severity", {"m": np.array([])}, 1.5
+                ),
+                lambda data=data: portfolio_calibration_table(
+                    data, "severity", {"m": np.array([])}
+                ),
+                lambda data=data: grouped_calibration(
+                    data, "severity", {"m": np.array([])}
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "nonempty"):
+                    operation()
+
+    def test_relativities_are_only_categorical_main_effects(self) -> None:
+        terms = [f"C({feature})[level]" for feature in CATEGORICAL_FEATURES] + [
+            "intercept",
+            "LogDensity",
+            "bs(DrivAge, df=5)[0]",
+            "C(VehBrand)[B2]:LogDensity",
+            "C(Other)[level]",
+            "C(Area, Sum)[level]",
+        ]
+        coefficients = pd.DataFrame(
+            {
+                "coef": np.linspace(-0.5, 0.5, len(terms)),
+                "se": 0.1,
+                "p_value": 0.2,
+                "ci_lower": -0.8,
+                "ci_upper": 0.8,
+            },
+            index=terms,
+        )
+        model = Mock()
+        model.coef_table.return_value = coefficients
+        table = coefficient_relativity_table(model)
+        np.testing.assert_array_equal(table.term, terms)
+        for column in ("coef", "p_value", "ci_lower", "ci_upper"):
+            np.testing.assert_array_equal(table[column], coefficients[column])
+        np.testing.assert_array_equal(table.std_error, coefficients.se)
+        for output, source in (
+            ("relativity", "coef"),
+            ("relativity_lower", "ci_lower"),
+            ("relativity_upper", "ci_upper"),
+        ):
+            np.testing.assert_allclose(
+                table[output].iloc[:5], np.exp(coefficients[source].iloc[:5])
+            )
+            self.assertTrue(table[output].iloc[5:].isna().all())
 
     def test_severity_fit_adds_zero_weight_anchor_for_no_claim_category(self) -> None:
         data = synthetic_pricing_frame()
@@ -511,6 +762,139 @@ class PurePremiumTutorialTest(unittest.TestCase):
                     "pure_premium_double_lift.png",
                 },
             )
+
+    @patch("nonlife_pureprem.pure_premium.RATING_FORMULA", "LogDensity")
+    @patch(
+        "nonlife_pureprem.pure_premium.GeneralizedLinearRegressor",
+        new=lambda **kwargs: GeneralizedLinearRegressor(**kwargs, gradient_tol=1e-10),
+    )
+    def test_inference_covariance_weight_and_exposure_units(self) -> None:
+        # Converge both unit systems tightly to isolate covariance from solver tolerance.
+        data = synthetic_pricing_frame(120)
+        data["Exposure"] *= 0.005  # Total exposure is below the coefficient count.
+        for component in ("frequency", "severity", "pure_premium"):
+            with self.subTest(component=component):
+                rows, target, weight = target_and_weight(data, component)
+                model = fit_glum_inference(data, component, 1.5)
+                reference = GeneralizedLinearRegressor(**model.get_params()).fit(
+                    rows,
+                    target,
+                    sample_weight=weight,
+                )
+                np.testing.assert_array_equal(
+                    model.predict(rows), reference.predict(rows)
+                )
+                normalized = GeneralizedLinearRegressor(**model.get_params()).fit(
+                    rows,
+                    target,
+                    sample_weight=weight / weight.mean(),
+                    store_covariance_matrix=True,
+                )
+                np.testing.assert_allclose(
+                    model.covariance_matrix_, normalized.covariance_matrix_, rtol=1e-9
+                )
+                self.assertTrue(np.isfinite(model.coef_table().to_numpy()).all())
+
+                scaled = data.copy()
+                weight_column = "ClaimNb" if component == "severity" else "Exposure"
+                scaled[weight_column] *= 7
+                scaled_model = fit_glum_inference(scaled, component, 1.5)
+                np.testing.assert_allclose(
+                    scaled_model.covariance_matrix_, model.covariance_matrix_, rtol=1e-9
+                )
+                np.testing.assert_allclose(
+                    scaled_model.predict(rows), model.predict(rows), rtol=1e-9
+                )
+
+                if component == "frequency":
+                    design = np.column_stack([np.ones(len(rows)), rows["LogDensity"]])
+                    mean = model.predict(rows)
+                    information = design.T @ ((weight * mean)[:, None] * design)
+                    scores = design * (weight * (target - mean))[:, None]
+                    inverse = np.linalg.inv(information)
+                    sandwich = inverse @ (scores.T @ scores) @ inverse
+                    sandwich *= len(rows) / (len(rows) - design.shape[1])
+                    np.testing.assert_allclose(
+                        model.covariance_matrix_, sandwich, rtol=1e-10
+                    )
+
+                if component != "severity":
+                    days = data.copy()
+                    days["Exposure"] *= 365
+                    days[
+                        {"frequency": "Frequency", "pure_premium": "PurePremium"}[
+                            component
+                        ]
+                    ] /= 365
+                    daily = fit_glum_inference(days, component, 1.5)
+                    np.testing.assert_allclose(
+                        daily.coef_, model.coef_, rtol=1e-6, atol=1e-7
+                    )
+                    np.testing.assert_allclose(
+                        daily.std_errors()[1:], model.std_errors()[1:], rtol=1e-6
+                    )
+                    np.testing.assert_allclose(
+                        daily.predict(rows) * 365, model.predict(rows), rtol=1e-6
+                    )
+
+    def test_inference_rating_formula_and_severity_rows(self) -> None:
+        data = synthetic_pricing_frame(180)
+        rng = np.random.default_rng(7)
+        # Cover every spline basis; the generic fixture leaves high-bonus columns zero.
+        data["BonusMalus"] = rng.uniform(0, 230, len(data))
+        data.loc[data.index[-1], "VehBrand"] = "B1"
+        for component in ("frequency", "severity", "pure_premium"):
+            with self.subTest(component=component):
+                model = fit_glum_inference(data, component, 1.5)
+                rows, target, weight = target_and_weight(data, component)
+                rows = rows.copy()
+                for column in ("VehBrand", "VehPower", "VehGas", "Region", "Area"):
+                    rows[column] = rows[column].cat.remove_unused_categories()
+                reference = GeneralizedLinearRegressor(**model.get_params()).fit(
+                    rows, target, sample_weight=weight
+                )
+                np.testing.assert_array_equal(
+                    model.predict(rows), reference.predict(rows)
+                )
+                covariance = reference.covariance_matrix(
+                    rows,
+                    target,
+                    sample_weight=weight / weight.mean(),
+                    robust=True,
+                    dispersion=1,
+                )
+                np.testing.assert_allclose(model.covariance_matrix_, covariance)
+                self.assertTrue(np.isfinite(model.coef_table().to_numpy()).all())
+                for n_rows in (1, 2):
+                    with (
+                        self.subTest(n_rows=n_rows),
+                        self.assertRaisesRegex(ValueError, "more eligible policy rows"),
+                    ):
+                        fit_glum_inference(rows.iloc[:n_rows], component, 1.5)
+
+    @patch("nonlife_pureprem.pure_premium.RATING_FORMULA", "LogDensity")
+    def test_inference_rejects_unsupported_rows_and_invalid_covariance(self) -> None:
+        data = synthetic_pricing_frame()
+        for component in ("frequency", "severity", "pure_premium"):
+            with self.subTest(component=component):
+                rows, _, _ = target_and_weight(data, component)
+                with self.assertRaisesRegex(ValueError, "more eligible policy rows"):
+                    fit_glum_inference(rows.iloc[:2], component, 1.5)
+        for covariance, message in (
+            (np.array([[np.nan, 0], [0, 1]]), "finite"),
+            (np.array([[1, np.inf], [np.inf, 1]]), "finite"),
+            (np.diag([1.0, -0.01]), "negative variances"),
+        ):
+            with (
+                self.subTest(message=message),
+                patch.object(
+                    GeneralizedLinearRegressor,
+                    "covariance_matrix",
+                    return_value=covariance,
+                ),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                fit_glum_inference(data, "frequency", 1.5)
 
     def test_tiny_glum_and_lightgbm_family_fits(self) -> None:
         rng = np.random.default_rng(42)
@@ -695,6 +1079,52 @@ class PurePremiumTutorialTest(unittest.TestCase):
             axis.lines[1].get_ydata(), axis.lines[2].get_ydata()
         )
         plt.close(fig)
+
+    def test_survival_grid_includes_rare_maximum_and_full_weights(self) -> None:
+        data = synthetic_pricing_frame(1001)
+        data["ClaimNb"] = 1
+        data["ClaimAmountCapped"] = np.r_[np.full(1000, 1000.0), 100_000.0]
+        data["Severity"] = data["ClaimAmountCapped"]
+        data["PurePremium"] = data["ClaimAmountCapped"] / data["Exposure"]
+        for plot, args, weight in (
+            (gamma_ccdf_diagnostic, (1.0,), data["ClaimNb"]),
+            (tweedie_ccdf_diagnostic, (1.5, 100.0), data["Exposure"]),
+        ):
+            with self.subTest(plot=plot.__name__):
+                fig, axis = plot(data, pd.Series(1000.0, index=data.index), *args)
+                x, sf = axis.lines[0].get_data()
+                grid = axis.lines[1].get_xdata()
+                np.testing.assert_array_equal(x, [1000.0, 100_000.0])
+                np.testing.assert_allclose(sf, [weight.iloc[-1] / weight.sum(), 0])
+                self.assertEqual(len(grid), 128)
+                np.testing.assert_allclose(grid[[0, -1]], [1000.0, 100_000.0])
+                plt.close(fig)
+
+    def test_survival_constant_positive_and_zero_samples(self) -> None:
+        data = synthetic_pricing_frame(4)
+        data["ClaimNb"] = 1
+        data["Severity"] = data["ClaimAmountCapped"] = 1000.0
+        data["PurePremium"] = data["ClaimAmountCapped"] / data["Exposure"]
+        for plot, args in (
+            (gamma_ccdf_diagnostic, (1.0,)),
+            (tweedie_ccdf_diagnostic, (1.5, 100.0)),
+        ):
+            fig, axis = plot(data, pd.Series(1000.0, index=data.index), *args)
+            np.testing.assert_array_equal(axis.lines[0].get_xdata(), [1000.0])
+            grid = axis.lines[1].get_xdata()
+            self.assertLess(grid[0], 1000)
+            self.assertGreater(grid[-1], 1000)
+            plt.close(fig)
+        data[["ClaimNb", "Frequency", "ClaimAmountCapped", "PurePremium"]] = 0
+        for plot, args in (
+            (poisson_ccdf_diagnostic, (float("inf"),)),
+            (tweedie_ccdf_diagnostic, (1.5, 100.0)),
+        ):
+            fig, axis = plot(data, pd.Series(1.0, index=data.index), *args)
+            np.testing.assert_array_equal(axis.lines[0].get_data(), [[0], [0]])
+            self.assertTrue(np.isfinite(axis.lines[1].get_ydata()).all())
+            self.assertLess(*axis.get_xlim())
+            plt.close(fig)
 
     def test_conditional_diagnostics_require_alignment_and_valid_parameters(
         self,
